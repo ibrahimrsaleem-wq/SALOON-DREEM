@@ -1,0 +1,60 @@
+name: Restore and publish source tree
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.source-package/**'
+      - '.github/workflows/restore-source-package.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout transfer branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct ZIP and verify SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/saloon-dreem.b64
+          for idx in $(seq 0 18); do
+            part=$(printf '%03d' "$idx")
+            repair_dir=".source-package/repair"
+            if [[ -d "$repair_dir" ]] && compgen -G "$repair_dir/part-${part}-*.b64" >/dev/null; then
+              while IFS= read -r f; do cat "$f" >> /tmp/saloon-dreem.b64; done < <(find "$repair_dir" -maxdepth 1 -type f -name "part-${part}-*.b64" | sort)
+            else
+              cat ".source-package/part-${part}.b64" >> /tmp/saloon-dreem.b64
+            fi
+          done
+          tr -d '\r\n ' < /tmp/saloon-dreem.b64 | base64 --decode > /tmp/SALOON-DREEM-1.1.0-source.zip
+          echo "bdbeda15e54539a0fa56e3686a7c91c6f507e95fb5d9929afe709d5540b4a308  /tmp/SALOON-DREEM-1.1.0-source.zip" | sha256sum --check
+          mkdir -p /tmp/saloon-unpacked
+          unzip -q /tmp/SALOON-DREEM-1.1.0-source.zip -d /tmp/saloon-unpacked
+          test -d /tmp/saloon-unpacked/SALOON-DREEM
+          test -f /tmp/saloon-unpacked/SALOON-DREEM/README.md
+
+      - name: Publish full source to source-tree branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin source-tree >/dev/null 2>&1; then
+            git switch -C source-tree origin/source-tree
+            find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          else
+            git switch --orphan source-tree
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+          cp -a /tmp/saloon-unpacked/SALOON-DREEM/. .
+          git add -A
+          git commit -m "publish: SALOON DREEM 1.1.0 full source"
+          git push origin source-tree
