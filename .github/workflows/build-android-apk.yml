@@ -1,0 +1,159 @@
+name: Build and publish branded Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-android-apk.yml"
+      - "tools/brand-android-icons.py"
+      - "tools/configure-mobile.mjs"
+      - "frontend/icons/icon-512.png"
+      - "frontend/app.js"
+      - "frontend/styles.css"
+      - "frontend/index.html"
+      - "frontend/runtime-config.js"
+      - "capacitor.config.json"
+      - "package.json"
+      - "package-lock.json"
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: saloon-dreem-android-publish
+  cancel-in-progress: false
+
+jobs:
+  android:
+    name: Build, verify and publish Android APK
+    runs-on: ubuntu-latest
+    env:
+      MOBILE_API_BASE_URL: ${{ vars.MOBILE_API_BASE_URL }}
+    steps:
+      - name: Checkout main source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install Python image tooling
+        run: python -m pip install --disable-pip-version-check Pillow
+
+      - name: Install project dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build web assets and configure optional server endpoint
+        run: |
+          npm run build:web
+          node tools/configure-mobile.mjs
+
+      - name: Generate Capacitor Android project
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      - name: Apply SALOON DREEM Android launcher icon
+        run: python tools/brand-android-icons.py
+
+      - name: Build installable Android APK
+        run: cd android && ./gradlew --no-daemon clean assembleDebug
+
+      - name: Verify APK signature, package ID and icon resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | grep -F "package: name='com.saloondreem.app'"
+          unzip -t "$APK" >/dev/null
+          echo "APK file exists, ZIP structure is valid, and Android package signature verifies."
+
+      - name: Upload verified APK as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SALOON-DREEM-Android-APK-1.2.2-Branded
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Prepare release APK and refresh checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/SALOON-DREEM-Android-1.2.2-debug.apk
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v1.2.2" > dist/release-metadata.json
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          dist = Path("dist")
+          meta = json.loads((dist / "release-metadata.json").read_text(encoding="utf-8"))
+          new_apk = dist / "SALOON-DREEM-Android-1.2.2-debug.apk"
+          lines = [
+              "SALOON DREEM 1.2.2 — SHA-256 checksums",
+              "Android APK rebuilt from the current main source with branded native launcher icons.",
+              "",
+          ]
+          seen = set()
+          for asset in meta.get("assets", []):
+              name = asset.get("name", "")
+              if name == "SALOON-DREEM-1.2.2-SHA256SUMS.txt":
+                  continue
+              if name == "SALOON-DREEM-Android-1.2.2-debug.apk":
+                  continue
+              digest = asset.get("digest") or ""
+              if digest.startswith("sha256:"):
+                  lines.append(f"{digest.split(':', 1)[1]}  {name}")
+                  seen.add(name)
+          apk_digest = hashlib.sha256(new_apk.read_bytes()).hexdigest()
+          lines.append(f"{apk_digest}  {new_apk.name}")
+          required = {
+              "SALOON-DREEM-Portable-1.2.2.exe",
+              "SALOON-DREEM-Windows-1.2.2-Ready.zip",
+              "SALOON-DREEM-Source-1.2.2.tar.gz",
+              "SALOON-DREEM-Icon-1.2.2.ico",
+          }
+          missing = sorted(required - seen)
+          if missing:
+              raise SystemExit(f"Release checksums missing assets: {missing}")
+          (dist / "SALOON-DREEM-1.2.2-SHA256SUMS.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print(f"Prepared checksums; APK SHA-256: {apk_digest}")
+          PY
+
+      - name: Replace Android APK in the permanent GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload v1.2.2 \
+            dist/SALOON-DREEM-Android-1.2.2-debug.apk \
+            dist/SALOON-DREEM-1.2.2-SHA256SUMS.txt \
+            --clobber
