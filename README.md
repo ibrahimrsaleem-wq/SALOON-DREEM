@@ -45,6 +45,18 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 يُنتج البناء الملف \`SALOON-DREEM-Portable-1.2.2.exe\` بعد تجميع خادم FastAPI ودمجه مع Electron. لا يتطلب مثبتًا تقليديًا، لكن قاعدة بيانات Windows تُحفظ في مجلد بيانات المستخدم الخاص بالتطبيق وليس بجانب الملف التنفيذي؛ نسخ EXE إلى جهاز آخر لا ينقل بيانات الجهاز الأصلي تلقائيًا. الملف غير موقّع بشهادة ناشر تجارية، لذا قد يعرض Windows SmartScreen تنبيهًا.
 
+## إزالة تحذيرات Windows بالطريقة الرسمية
+
+ملف Windows الحالي غير موقّع بشهادة ناشر تجارية. أُضيف سير عمل توقيع إلى [sign-windows-exe.yml](.github/workflows/sign-windows-exe.yml) ليوقّع ملف EXE وحزمة ZIP بعد التحقق من التوقيع، ثم يحدّث ملف SHA-256 ويرفع النسختين الموقعتين إلى الإصدار `v1.2.2`.
+
+**هذا المسار لا ينتج نسخة موقّعة تلقائيًا من دون شهادة:** يلزم امتلاك شهادة توقيع كود صادرة من جهة موثوقة، وتحتوي مفتاحًا خاصًا وصلاحية Code Signing. لإعدادها:
+
+1. حوّل ملف PFX إلى Base64 محليًا على جهازك؛ لا ترفع ملف PFX أو كلمة مروره داخل المستودع.
+2. من GitHub افتح **Settings → Secrets and variables → Actions → New repository secret**، وأضف السرّين `WINDOWS_CODESIGN_CERTIFICATE_BASE64` و`WINDOWS_CODESIGN_CERTIFICATE_PASSWORD`.
+3. افتح **Actions → Sign and publish Windows EXE → Run workflow**. إذا نجح التوقيع والتحقق فسيتم تحديث ملف EXE وحزمة ZIP وملف SHA-256 في صفحة الإصدار.
+
+إذا لم تكن لديك شهادة توقيع موثوقة، فلن يحوّل هذا الإجراء الملف إلى برنامج موثوق بمجرد إعادة بنائه. وحتى مع التوقيع قد يستمر SmartScreen بتحذير ملف جديد إلى أن تتراكم سمعته. أما حظر البرنامج بسياسة مؤسسة أو Smart App Control فقد يتطلب سماحًا من مسؤول الجهاز. راجع [توجيهات Microsoft حول SmartScreen](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation) و[خيارات توقيع تطبيقات Windows](https://learn.microsoft.com/ar-sa/windows/apps/package-and-deploy/code-signing-options).
+
 ## تطبيق Android — APK للهواتف
 
 **التنزيل المباشر:** [SALOON-DREEM-Android-1.2.2-debug.apk](https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/releases/download/v1.2.2/SALOON-DREEM-Android-1.2.2-debug.apk)  
