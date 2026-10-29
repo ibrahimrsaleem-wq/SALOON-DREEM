@@ -4,6 +4,23 @@
 
 **الإصدار الحالي: 1.2.2 — نسخة مرشحة للاستعادة والتوزيع.** أُعيد تجميع شجرة مصدر قابلة للتشغيل بعد اكتشاف أن حزم المصدر القديمة لم تعد سليمة بالكامل. استُخدمت الملفات التي اجتازت فحص CRC، بينما تستخدم الواجهة حزمة JavaScript المولّدة \`frontend/app.js\` لأن ملف TypeScript الأصلي لم يمكن استعادته بثقة.
 
+## تنزيل النسخة الجاهزة
+
+**للتشغيل على Windows، نزّل أحد الخيارين من صفحة الإصدار الدائم:**
+
+- [تحميل ملف EXE مباشرة — SALOON-DREEM-Portable-1.2.2.exe](https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/releases/download/v1.2.2/SALOON-DREEM-Portable-1.2.2.exe)
+- [تحميل حزمة Windows ZIP الجاهزة مع تعليمات التشغيل والاختصار](https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/releases/download/v1.2.2/SALOON-DREEM-Windows-1.2.2-Ready.zip)
+- [فتح صفحة الإصدار وجميع الملفات](https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/releases/tag/v1.2.2)
+- [تحميل ملفات المصدر المستعادة](https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/releases/download/v1.2.2/SALOON-DREEM-Source-1.2.2.tar.gz)
+- [تحميل Android Debug APK](https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/releases/download/v1.2.2/SALOON-DREEM-Android-1.2.2-debug.apk)
+- [تحميل SHA-256 checksums للتحقق من سلامة التنزيل](https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/releases/download/v1.2.2/SALOON-DREEM-1.2.2-SHA256SUMS.txt)
+
+**تشغيل سريع:** فك حزمة Windows ZIP في مجلد دائم ثم افتح `SALOON-DREEM-Portable-1.2.2.exe`. عند أول تشغيل أنشئ حساب المدير. إذا رغبت باختصار على سطح المكتب شغّل `Create-Desktop-Shortcut.bat` من الحزمة بعد فك الضغط.
+
+ملف EXE حجمه أكبر من الحد المعتاد للملفات التي تُرفع مباشرة إلى Git، لذلك يُوزّع كملف مرفق في GitHub Releases بينما تبقى ملفات المصدر في الفرع الرئيسي. الملف غير موقّع بشهادة ناشر تجارية وقد يظهر تحذير SmartScreen.
+
+> **ملاحظة عن المصدر:** هذا إصدار مستعاد ومتحقق منه آليًا، لكن تقرير التدقيق يذكر أن بعض الملفات الأصلية التالفة لم يمكن استعادتها بثقة؛ لا يعني ذلك ضمان استرجاع كل ملف تاريخي مفقود.
+
 ## الميزات
 
 - لوحة إدارة: ملخص، المواعيد والتقويم، العملاء، فريق الحلاقين، الخدمات والأسعار، المالية والصندوق، التقارير، والإعدادات.
