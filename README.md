@@ -1,29 +1,37 @@
-# SALOON DREEM — 1.1.0
+# SALOON DREEM — نظام إدارة صالون الحلاقة
 
-Arabic-first salon and barber-shop management application.
+تطبيق عربي RTL لإدارة الحجوزات، الحلاقين، الخدمات والأسعار، العملاء، تسجيل التحصيلات والمصروفات، والإعدادات. يعتمد على FastAPI وSQLite، بواجهة ويب متجاوبة وتهيئة PWA ونسخ تغليف Windows وAndroid.
 
-## Full source package
-The complete application source, tests, documentation, desktop/mobile configuration and build workflows are provided in **SALOON-DREEM-1.1.0-source.zip** in this repository. Download the ZIP and extract it to work with the source tree.
+**الإصدار 1.2.1 هو مرشح استعادة وبناء.** أُعيد تجميع شجرة المشروع من الملفات التي أمكن التحقق من سلامة CRC الخاصة بها من حزم المصدر السابقة. لم نتمكن من استعادة أرشيف المصدر كاملاً أو ملف TypeScript الأصلي؛ تستخدم الواجهة الحزمة المولّدة frontend/app.js.
 
-## Included
-- FastAPI backend and SQLite data store
-- Arabic right-to-left responsive client and salon management interface
-- Appointment scheduling and conflict checks
-- Barbers, services, customers and cash ledger
-- PWA/mobile configuration and Electron/Windows packaging setup
-- Tests, Docker configuration, CI/build workflow source and deployment documentation
+## تشغيل من المصدر على Windows
+ثبّت Python 3.12 أو 3.13 وNode.js 22.12 أو أحدث، ثم شغّل RUN-SALOON-DREEM.bat. يمكن استخدام PowerShell:
+\`\`\`powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\\RUN-SALOON-DREEM.ps1
+\`\`\`
+افتح http://127.0.0.1:8000 وأنشئ حساب المدير في أول تشغيل؛ لا توجد كلمة مرور افتراضية. أضف حلاقًا نشطًا قبل استقبال حجوزات فعلية.
 
-## Quick start (Windows)
-1. Download and extract the source ZIP.
-2. Install Python 3.12 or 3.13.
-3. Run `RUN-SALOON-DREEM.bat`.
-4. Open the local URL printed by the launcher and create the initial admin account.
+## الوظائف الأساسية
+- إعداد حساب مدير، تسجيل دخول وتغيير كلمة المرور وإبطال الجلسات القديمة.
+- حجز عميل وحفظه في قاعدة بيانات الصالون، منع تضارب الحلاق وساعات العمل والحجوزات في الماضي.
+- إدارة المواعيد والحلاقين والعملاء والخدمات والأسعار.
+- دفتر دخل ومصروفات وملخص مالي وتحصيل الموعد مرة واحدة وتصدير الحجوزات CSV.
+- كلمات مرور PBKDF2-HMAC-SHA256، جلسات موقّعة، حدّ أولي للمحاولات، ورؤوس أمن أساسية.
+- واجهة عربية RTL، تصميم متجاوب، وضع فاتح/داكن، وملفات PWA.
 
-## Validation report
-The supplied source package was checked with 7 API tests, TypeScript checking, JavaScript syntax checking and Python compile checks.
+## Windows Portable EXE
+ينتج سير العمل SALOON-DREEM-Portable-1.2.1.exe بعد تجميع خادم FastAPI في ملف مستقل وتغليفه مع Electron. تُحفظ قاعدة البيانات في مجلد بيانات المستخدم الخاص بالتطبيق وليس بجوار الملف التنفيذي. لا يوجد توقيع تجاري للناشر، وقد يعرض Windows SmartScreen تحذيرًا.
 
-## Important deployment notes
-This is an initial runnable release, not yet a fully operated production service. Cloud multi-device hosting, external payments, WhatsApp/SMS notifications and live Android API hosting need additional deployment and integration configuration. The Android app needs a reachable HTTPS API endpoint.
+## Android APK
+ينتج سير العمل app-debug.apk للتثبيت والاختبار الجانبي، وليس حزمة متجر موقّعة. يحتاج تطبيق Android إلى خادم API متاح للهاتف عبر HTTPS: عيّن متغير GitHub Actions باسم MOBILE_API_BASE_URL إلى عنوان HTTPS لخادمك؛ إذا تركته فارغًا فاضبط الاتصال من التطبيق إن ظهر الخيار. لا تأتي مع الحزمة استضافة عامة جاهزة، ولا يمكنها مشاركة قاعدة بيانات الكمبيوتر تلقائيًا دون نشر API.
 
-## Security
-Do not commit a real `.env`, database, access token or production secret. Use `.env.example` as a template.
+## اختبار المشروع
+شغّل python -m pip install -r requirements.txt ثم python -m pytest -q، وبعدها npm ci وnpm run build:web وnpm run check:js. تحقق من نجاح GitHub Actions قبل اعتماد الملفين التنفيذيين.
+
+## حدود مهمة
+- التحصيل الحالي تسجيل محاسبي داخلي، وليس بوابة دفع إلكتروني.
+- لا توجد تكاملات فعالة لـ SMS/OTP أو WhatsApp أو Google Calendar ولا مفاتيح توقيع تجارية.
+- ملف العميل وسجلّه الشخصي في الواجهة يعتمد جزئيًا على التخزين المحلي؛ المزامنة الآمنة عبر الأجهزة تحتاج هوية عميل موثقة.
+- SQLite مناسب لتشغيل محلي أو حمل صغير. الاستضافة العامة تتطلب HTTPS وتخزينًا دائمًا ونسخًا احتياطية وتحديد معدل مركزيًا ومراجعة أمنية.
+- اجتياز الاختبارات الآلية لا يغني عن تجربة قبول على Windows وAndroid قبل استخدام بيانات حقيقية.
