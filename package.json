@@ -7,7 +7,7 @@
   "main": "desktop/main.cjs",
   "scripts": {
     "build:web": "node tools/build-web.mjs",
-    "check:js": "node --check frontend/app.js && node --check desktop/main.cjs && node --check frontend/runtime-config.js && node --check tools/configure-mobile.mjs && node --check tools/build-web.mjs",
+    "check:js": "node --check frontend/app.js && node --check desktop/main.cjs && node --check frontend/runtime-config.js && node --check frontend/sw.js && node --check tools/configure-mobile.mjs && node --check tools/build-web.mjs",
     "test:python": "python -m pytest -q",
     "desktop": "electron .",
     "dist:win": "npm run build:web && electron-builder --win portable",
