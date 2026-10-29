@@ -1,0 +1,61 @@
+{
+  "name": "saloon-dreem",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Arabic-first barber salon appointments and business management app",
+  "license": "UNLICENSED",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "build:web": "tsc --strict --target ES2022 --module none --lib DOM,ES2022 --outFile frontend/app.js frontend/src/app.ts",
+    "check:types": "tsc --noEmit --strict --target ES2022 --module none --lib DOM,ES2022 frontend/src/app.ts",
+    "check:js": "node --check frontend/app.js && node --check desktop/main.cjs && node --check frontend/runtime-config.js && node --check tools/configure-mobile.mjs",
+    "test:python": "python -m pytest -q",
+    "desktop": "electron .",
+    "dist:win": "npm run build:web && electron-builder --win portable",
+    "mobile:prepare": "npm run build:web && cap sync android",
+    "mobile:android:debug": "npm run mobile:prepare && cd android && gradlew.bat assembleDebug"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
+    "electron": "^45.1.0",
+    "electron-builder": "^26.0.0",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {},
+  "build": {
+    "appId": "com.saloondreem.app",
+    "productName": "SALOON DREEM",
+    "asar": true,
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "desktop/**/*",
+      "frontend/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/server/saloon-dreem-server.exe",
+        "to": "server/saloon-dreem-server.exe"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "SALOON-DREEM-Portable-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "SALOON-DREEM-Portable-${version}.${ext}"
+    }
+  }
+}

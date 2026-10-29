@@ -1,0 +1,53 @@
+[
+  {
+    "archive": "main-1.1.0-drop-first-char",
+    "archive_sha256": "8739c76e681f900923b900c9df0ef75cf421d39cabb54650c4b9ad19b6a76d85",
+    "entries_seen": 0,
+    "files_recovered_and_crc_verified": 0,
+    "rejected_or_corrupt_files": []
+  },
+  {
+    "archive": "main-1.1.0-drop-last-char",
+    "archive_sha256": "a56c01573ef819bc32fd1db04b03839fe5cef43936b1e2c6edea5937d42d6896",
+    "entries_seen": 32,
+    "files_recovered_and_crc_verified": 30,
+    "rejected_or_corrupt_files": [
+      {
+        "file": "SALOON-DREEM/frontend/src/app.ts",
+        "reason": "Bad CRC-32 for file 'SALOON-DREEM/frontend/src/app.ts'"
+      },
+      {
+        "file": "SALOON-DREEM/tests/test_api.py",
+        "reason": "Error -3 while decompressing data: invalid distance too far back"
+      }
+    ]
+  },
+  {
+    "archive": "package-1.2.0",
+    "archive_sha256": "df33ee9cd396e570477022a716c2208c42cceb1355f6e7d50fb9de0ee80794a5",
+    "entries_seen": 19,
+    "files_recovered_and_crc_verified": 14,
+    "rejected_or_corrupt_files": [
+      {
+        "file": "SALOOON-DDEEM/backend/app/server_entry.p",
+        "reason": "Overlapped entries: 'SALOOON-DDEEM/backend/app/server_entry.p' (possible zip bomb)"
+      }
+    ]
+  },
+  {
+    "archive": "verified-1.2.0",
+    "archive_sha256": "43068e597aeb47f31547233e6f84e0d471e3dd0b6a22c33a88c6632d1be42f35",
+    "entries_seen": 35,
+    "files_recovered_and_crc_verified": 25,
+    "rejected_or_corrupt_files": [
+      {
+        "file": "SALOON-DREEM/backend/app/main.py",
+        "reason": "Bad CRC-32 for file 'SALOON-DREEM/backend/app/main.py'"
+      },
+      {
+        "file": "SALOOON-DREEM/frontend/icons/icon-192.pn",
+        "reason": "Error -3 while decompressing data: invalid block type"
+      }
+    ]
+  }
+]

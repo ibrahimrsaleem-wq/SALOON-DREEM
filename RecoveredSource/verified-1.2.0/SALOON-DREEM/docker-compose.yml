@@ -1,0 +1,19 @@
+services:
+  saloon-dreem:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      APP_TIMEZONE: Asia/Gaza
+      DATA_DIR: /app/data
+      DATABASE_PATH: /app/data/saloon_dreem.db
+      # Add trusted browser origins here if frontend and API are hosted separately.
+      CORS_ORIGINS: https://localhost,capacitor://localhost
+    volumes:
+      - saloon_data:/app/data
+
+volumes:
+  saloon_data:

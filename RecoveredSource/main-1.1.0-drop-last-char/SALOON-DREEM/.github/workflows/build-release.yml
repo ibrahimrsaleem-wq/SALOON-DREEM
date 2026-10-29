@@ -1,0 +1,124 @@
+name: Build SALOON DREEM
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    name: Build portable Windows EXE
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Install Python dependencies and PyInstaller
+        run: python -m pip install --upgrade pip; python -m pip install -r requirements-build.txt
+      - name: Build the packaged API server
+        shell: pwsh
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onefile
+          --name saloon-dreem-server
+          --distpath dist/server
+          --workpath build/pyinstaller
+          --specpath build/spec
+          --add-data "frontend;frontend"
+          --collect-all fastapi
+          --collect-all starlette
+          --collect-all uvicorn
+          --collect-all pydantic
+          --collect-all dotenv
+          --collect-all h11
+          --hidden-import uvicorn.logging
+          --hidden-import uvicorn.loops.auto
+          --hidden-import uvicorn.protocols.http.auto
+          --hidden-import uvicorn.lifespan.on
+          server.py
+      - name: Install JavaScript dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build portable EXE
+        run: npm run dist:win
+      - name: Upload portable EXE
+        uses: actions/upload-artifact@v7
+        with:
+          name: SALOON-DREEM-Windows-Portable
+          path: dist-electron/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  android-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    env:
+      MOBILE_API_BASE_URL: ${{ vars.MOBILE_API_BASE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        run: yes | sdkmanager --licenses >/dev/null || true; sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      - name: Install JavaScript dependencies
+        run: npm install --no-audit --no-fund
+      - name: Set mobile API endpoint
+        run: node tools/configure-mobile.mjs
+      - name: Generate Android project and sync assets
+        run: npx cap add android && npx cap sync android
+      - name: Build installable debug APK
+        run: cd android && ./gradlew --no-daemon assembleDebug
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: SALOON-DREEM-Android-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+  github-release:
+    name: Attach binaries to GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows-portable, android-apk]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows build
+        uses: actions/download-artifact@v7
+        with:
+          name: SALOON-DREEM-Windows-Portable
+          path: release-assets
+      - name: Download Android APK
+        uses: actions/download-artifact@v7
+        with:
+          name: SALOON-DREEM-Android-APK
+          path: release-assets
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
