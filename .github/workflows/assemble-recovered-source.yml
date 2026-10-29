@@ -357,11 +357,11 @@ jobs:
 
           # Serialize slot checks so concurrent requests do not both reserve one slot.
           appointment_check = '''    with db() as con:
-        service = con.execute("SELECT * FROM services WHERE id=? AND active=1", (payload.service_id,)).fetchone()'''
+                    service = con.execute("SELECT * FROM services WHERE id=? AND active=1", (payload.service_id,)).fetchone()'''
           assert source.count(appointment_check) == 2, "Expected exactly two appointment creation routes"
           source = source.replace(appointment_check, '''    with db() as con:
-        con.execute("BEGIN IMMEDIATE")
-        service = con.execute("SELECT * FROM services WHERE id=? AND active=1", (payload.service_id,)).fetchone()''')
+                    con.execute("BEGIN IMMEDIATE")
+                    service = con.execute("SELECT * FROM services WHERE id=? AND active=1", (payload.service_id,)).fetchone()''')
 
           pay_marker = '@app.post("/api/appointments/{appointment_id}/pay")'
           pay_pos = source.index(pay_marker)
