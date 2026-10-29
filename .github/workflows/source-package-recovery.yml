@@ -1,0 +1,91 @@
+name: Recover source archive payloads
+
+on:
+  push:
+    branches:
+      - audit/package-validation-1.2.0
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  salvage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Salvage archive entries where possible
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics-recovery
+
+          python - <<'PY'
+          from pathlib import Path
+          import base64, re
+
+          out = Path("diagnostics-recovery")
+          def join_parts(paths):
+              return "".join(p.read_text(encoding="ascii").strip() for p in paths)
+
+          # Main 1.1.0 transfer set, honoring its current repair-piece convention.
+          root = Path(".source-package")
+          main_parts = []
+          for i in range(19):
+              num = f"{i:03d}"
+              repairs = sorted((root / "repair").glob(f"part-{num}-*.b64"))
+              paths = repairs if repairs else [root / f"part-{num}.b64"]
+              if not all(p.exists() for p in paths):
+                  raise FileNotFoundError(f"Missing source archive segment {num}")
+              main_parts.extend(paths)
+          main_text = join_parts(main_parts)
+          (out / "main-1.1.0-transfer-length.txt").write_text(
+              f"segments={len(main_parts)} chars={len(main_text)} remainder={len(main_text)%4}\n",
+              encoding="utf-8")
+          for label, text in [
+              ("main-1.1.0", main_text),
+              ("package-1.2.0", join_parts(sorted(Path("restore-package-1.2.0").glob("part-*.b64")))),
+              ("verified-1.2.0", join_parts(sorted(Path("restore-package-1.2.0-verified").glob("part-*.b64")))),
+          ]:
+              clean = re.sub(r"\s+", "", text)
+              if not re.fullmatch(r"[A-Za-z0-9+/=]*", clean):
+                  (out / f"{label}.status.txt").write_text("invalid Base64 characters\n", encoding="utf-8")
+                  continue
+              clean += "=" * ((-len(clean)) % 4)
+              payload = base64.b64decode(clean, validate=True)
+              target = out / f"{label}.damaged.zip"
+              target.write_bytes(payload)
+              (out / f"{label}.status.txt").write_text(
+                  f"Base64 decoded {len(payload)} bytes; original chars={len(text)}; original remainder={len(text)%4}\n",
+                  encoding="utf-8")
+          PY
+
+          for candidate in diagnostics-recovery/*.damaged.zip; do
+            label="$(basename "$candidate" .damaged.zip)"
+            repaired="diagnostics-recovery/$label.recovered.zip"
+            log="diagnostics-recovery/$label-repair.log"
+            echo "=== Attempting ZIP recovery: $label ==="
+            (zip -FF "$candidate" --out "$repaired" >"$log" 2>&1 || true)
+            cat "$log"
+            if [ -f "$repaired" ] && unzip -t "$repaired" >"diagnostics-recovery/$label-zip-test.txt" 2>&1; then
+              echo "ZIP central-directory/CRC validation passed for $label"
+              mkdir -p "diagnostics-recovery/$label-source"
+              unzip -q "$repaired" -d "diagnostics-recovery/$label-source"
+              find "diagnostics-recovery/$label-source" -type f -printf '%P\n' | sort > "diagnostics-recovery/$label-inventory.txt"
+              find "diagnostics-recovery/$label-source" -type f \( -name 'package.json' -o -name 'requirements*.txt' -o -name 'pyproject.toml' -o -name 'pytest.ini' -o -name 'capacitor.config.*' -o -name 'electron-builder.*' -o -name 'build.gradle*' -o -name 'gradlew' \) -printf '%P\n' | sort > "diagnostics-recovery/$label-build-manifests.txt"
+              sha256sum "$repaired" > "diagnostics-recovery/$label-recovered-sha256.txt"
+              echo "Files recovered: $(wc -l < "diagnostics-recovery/$label-inventory.txt")"
+            else
+              rm -f "$repaired"
+              echo "No fully CRC-valid ZIP recovery for $label"
+            fi
+          done
+
+      - name: Upload salvage diagnostics and any fully validated source
+        uses: actions/upload-artifact@v4
+        with:
+          name: saloon-dreem-source-salvage
+          path: diagnostics-recovery/**
+          if-no-files-found: error
+          retention-days: 14
