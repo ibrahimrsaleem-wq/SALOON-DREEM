@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'saloon-dreem-shell-v1.2.1';
+const CACHE_NAME = 'saloon-dreem-shell-v1.2.2';
 const SHELL_ASSETS = [
   '/',
   '/styles.css',
