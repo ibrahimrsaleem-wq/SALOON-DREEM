@@ -63,10 +63,13 @@ jobs:
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           gh release download 'v1.2.2' --repo $env:GITHUB_REPOSITORY --pattern 'SALOON-DREEM-Portable-1.2.2.exe' --dir dist
-          if ($LASTEXITCODE -ne 0) { throw 'Could not download the Windows EXE from the selected GitHub Release.' }
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the Windows EXE from the GitHub Release.' }
+          gh release download 'v1.2.2' --repo $env:GITHUB_REPOSITORY --pattern 'SALOON-DREEM-Windows-1.2.2-Ready.zip' --dir dist
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the ready Windows ZIP package.' }
           gh release download 'v1.2.2' --repo $env:GITHUB_REPOSITORY --pattern 'SALOON-DREEM-1.2.2-SHA256SUMS.txt' --dir dist
           if ($LASTEXITCODE -ne 0) { throw 'Could not download the release SHA-256 file.' }
           if (-not (Test-Path 'dist/SALOON-DREEM-Portable-1.2.2.exe')) { throw 'The release EXE was not found.' }
+          if (-not (Test-Path 'dist/SALOON-DREEM-Windows-1.2.2-Ready.zip')) { throw 'The ready Windows ZIP package was not found.' }
 
       - name: Sign EXE with a trusted Authenticode certificate
         shell: pwsh
@@ -98,22 +101,47 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Stop'
           $exePath = 'dist/SALOON-DREEM-Portable-1.2.2.exe'
+          $zipPath = 'dist/SALOON-DREEM-Windows-1.2.2-Ready.zip'
           $sumPath = 'dist/SALOON-DREEM-1.2.2-SHA256SUMS.txt'
-          $hash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
-          $lines = @(Get-Content -LiteralPath $sumPath)
-          $updated = $false
-          for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match '^\s*[0-9a-fA-F]{64}\s+SALOON-DREEM-Portable-1\.2\.2\.exe\s*$') {
-              $lines[$i] = "$hash  SALOON-DREEM-Portable-1.2.2.exe"
-              $updated = $true
-            }
+
+          # Keep the ready-to-run ZIP synchronized with the signed standalone EXE.
+          $extractPath = Join-Path $env:RUNNER_TEMP 'saloondreem-ready-package'
+          if (Test-Path -LiteralPath $extractPath) { Remove-Item -LiteralPath $extractPath -Recurse -Force }
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
+          $packagedExe = Get-ChildItem -LiteralPath $extractPath -Filter 'SALOON-DREEM-Portable-1.2.2.exe' -Recurse -File | Select-Object -First 1
+          if ($null -eq $packagedExe) { throw 'The EXE was not found inside the ready ZIP package.' }
+          Copy-Item -LiteralPath $exePath -Destination $packagedExe.FullName -Force
+          Remove-Item -LiteralPath $zipPath -Force
+          Compress-Archive -Path (Join-Path $extractPath '*') -DestinationPath $zipPath -CompressionLevel Optimal -Force
+
+          $hashes = @{
+            'SALOON-DREEM-Portable-1.2.2.exe' = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            'SALOON-DREEM-Windows-1.2.2-Ready.zip' = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
           }
-          if (-not $updated) {
-            $lines += "$hash  SALOON-DREEM-Portable-1.2.2.exe"
+          $lines = @(Get-Content -LiteralPath $sumPath)
+          foreach ($name in $hashes.Keys) {
+            $updated = $false
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match ('^\s*[0-9a-fA-F]{64}\s+' + [regex]::Escape($name) + '\s*
+
+      - name: Publish signed EXE and updated checksum to GitHub Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release upload 'v1.2.2' --repo $env:GITHUB_REPOSITORY 'dist/SALOON-DREEM-Portable-1.2.2.exe' 'dist/SALOON-DREEM-Windows-1.2.2-Ready.zip' 'dist/SALOON-DREEM-1.2.2-SHA256SUMS.txt' --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the signed EXE and updated checksums.' }
+          gh release view 'v1.2.2' --repo $env:GITHUB_REPOSITORY
+)) {
+                $lines[$i] = "$($hashes[$name])  $name"
+                $updated = $true
+              }
+            }
+            if (-not $updated) { $lines += "$($hashes[$name])  $name" }
           }
           Set-Content -LiteralPath $sumPath -Value $lines -Encoding ascii
-          Write-Host 'EXE checksum refreshed after signing.'
+          Write-Host 'Signed EXE and ready ZIP checksums refreshed.'
 
       - name: Publish signed EXE and updated checksum to GitHub Release
         shell: pwsh
