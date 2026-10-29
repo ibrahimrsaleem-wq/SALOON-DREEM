@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: saloon-dreem
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeployTrigger: off
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: APP_TIMEZONE
+        value: Asia/Gaza
+      - key: DATA_DIR
+        value: /app/data
+      - key: DATABASE_PATH
+        value: /app/data/saloon_dreem.db
+      - key: TOKEN_SECRET
+        generateValue: true
+      - key: TOKEN_HOURS
+        value: "12"
+    disk:
+      name: saloon-dreem-data
+      mountPath: /app/data
+      sizeGB: 1
