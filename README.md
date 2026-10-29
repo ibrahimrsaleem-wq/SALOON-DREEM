@@ -35,3 +35,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 - ملف العميل وسجلّه الشخصي في الواجهة يعتمد جزئيًا على التخزين المحلي؛ المزامنة الآمنة عبر الأجهزة تحتاج هوية عميل موثقة.
 - SQLite مناسب لتشغيل محلي أو حمل صغير. الاستضافة العامة تتطلب HTTPS وتخزينًا دائمًا ونسخًا احتياطية وتحديد معدل مركزيًا ومراجعة أمنية.
 - اجتياز الاختبارات الآلية لا يغني عن تجربة قبول على Windows وAndroid قبل استخدام بيانات حقيقية.
+
+
+## Release-build status
+
+The automated Windows EXE and Android APK builds run in GitHub Actions. Use the `release-candidate-builds.yml` workflow run on the `release/1.2.1` branch; only download artifacts when both native jobs have succeeded.
