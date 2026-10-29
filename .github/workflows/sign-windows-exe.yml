@@ -1,0 +1,132 @@
+name: Sign and publish Windows EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing GitHub release tag to sign"
+        required: true
+        default: "v1.2.2"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: saloon-dreem-windows-code-signing
+  cancel-in-progress: false
+
+jobs:
+  sign-and-publish:
+    name: Authenticode-sign Windows EXE
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WINDOWS_CODESIGN_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERTIFICATE_BASE64 }}
+      WINDOWS_CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_CERTIFICATE_PASSWORD }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate signing secrets and certificate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERTIFICATE_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERTIFICATE_PASSWORD)) {
+            throw 'Code signing is not configured. Add repository Actions secrets WINDOWS_CODESIGN_CERTIFICATE_BASE64 and WINDOWS_CODESIGN_CERTIFICATE_PASSWORD for a valid, publicly trusted code-signing PFX certificate.'
+          }
+
+          $certPath = Join-Path $env:RUNNER_TEMP 'saloondreem-codesign.pfx'
+          $bytes = [Convert]::FromBase64String($env:WINDOWS_CODESIGN_CERTIFICATE_BASE64)
+          [System.IO.File]::WriteAllBytes($certPath, $bytes)
+
+          try {
+            $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+              $certPath,
+              $env:WINDOWS_CODESIGN_CERTIFICATE_PASSWORD,
+              [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+            )
+            if (-not $cert.HasPrivateKey) { throw 'The configured PFX certificate has no private key.' }
+            $now = [DateTime]::UtcNow
+            if ($now -lt $cert.NotBefore.ToUniversalTime() -or $now -gt $cert.NotAfter.ToUniversalTime()) {
+              throw 'The code-signing certificate is not currently valid.'
+            }
+            $eku = $cert.Extensions | Where-Object { $_ -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] } | Select-Object -First 1
+            if ($null -eq $eku -or -not ($eku.EnhancedKeyUsages | Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.3' })) {
+              throw 'The certificate must include the Code Signing EKU (1.3.6.1.5.5.7.3.3).'
+            }
+            Write-Host ("Certificate metadata validated. Subject: " + $cert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false))
+            $cert.Dispose()
+          }
+          finally {
+            Remove-Item -LiteralPath $certPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Download the existing Windows release EXE and checksums
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'SALOON-DREEM-Portable-1.2.2.exe' --dir dist
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the Windows EXE from the selected GitHub Release.' }
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'SALOON-DREEM-1.2.2-SHA256SUMS.txt' --dir dist
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the release SHA-256 file.' }
+          if (-not (Test-Path 'dist/SALOON-DREEM-Portable-1.2.2.exe')) { throw 'The release EXE was not found.' }
+
+      - name: Sign EXE with a trusted Authenticode certificate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $signtool = Get-ChildItem -LiteralPath $sdkRoot -Filter 'signtool.exe' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if ($null -eq $signtool) { throw 'Windows SDK SignTool could not be found on this runner.' }
+
+          $certPath = Join-Path $env:RUNNER_TEMP 'saloondreem-codesign.pfx'
+          $bytes = [Convert]::FromBase64String($env:WINDOWS_CODESIGN_CERTIFICATE_BASE64)
+          [System.IO.File]::WriteAllBytes($certPath, $bytes)
+          try {
+            $exe = (Resolve-Path 'dist/SALOON-DREEM-Portable-1.2.2.exe').Path
+            & $signtool.FullName sign /fd SHA256 /f $certPath /p $env:WINDOWS_CODESIGN_CERTIFICATE_PASSWORD /tr 'https://timestamp.digicert.com' /td SHA256 /d 'SALOON DREEM' $exe
+            if ($LASTEXITCODE -ne 0) { throw "SignTool signing failed with exit code $LASTEXITCODE." }
+            & $signtool.FullName verify /pa /v $exe
+            if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed with exit code $LASTEXITCODE." }
+          }
+          finally {
+            Remove-Item -LiteralPath $certPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Update the EXE checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exePath = 'dist/SALOON-DREEM-Portable-1.2.2.exe'
+          $sumPath = 'dist/SALOON-DREEM-1.2.2-SHA256SUMS.txt'
+          $hash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $lines = @(Get-Content -LiteralPath $sumPath)
+          $updated = $false
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*[0-9a-fA-F]{64}\s+SALOON-DREEM-Portable-1\.2\.2\.exe\s*$') {
+              $lines[$i] = "$hash  SALOON-DREEM-Portable-1.2.2.exe"
+              $updated = $true
+            }
+          }
+          if (-not $updated) {
+            $lines += "$hash  SALOON-DREEM-Portable-1.2.2.exe"
+          }
+          Set-Content -LiteralPath $sumPath -Value $lines -Encoding ascii
+          Write-Host 'EXE checksum refreshed after signing.'
+
+      - name: Publish signed EXE and updated checksum to GitHub Release
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release upload $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY 'dist/SALOON-DREEM-Portable-1.2.2.exe' 'dist/SALOON-DREEM-1.2.2-SHA256SUMS.txt' --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the signed EXE and updated checksums.' }
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY
