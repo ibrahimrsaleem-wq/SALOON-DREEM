@@ -80,7 +80,7 @@ jobs:
             repaired="diagnostics-recovery/$label.recovered.zip"
             log="diagnostics-recovery/$label-repair.log"
             echo "=== Attempting ZIP recovery: $label ==="
-            (zip -FF "$candidate" --out "$repaired" >"$log" 2>&1 || true)
+            (timeout 30s bash -c 'yes | zip -FF "$1" --out "$2"' _ "$candidate" "$repaired" >"$log" 2>&1 || true)
             cat "$log" || true
             if [ -f "$repaired" ] && unzip -t "$repaired" >"diagnostics-recovery/$label-zip-test.txt" 2>&1; then
               echo "ZIP central-directory and CRC validation passed: $label"
