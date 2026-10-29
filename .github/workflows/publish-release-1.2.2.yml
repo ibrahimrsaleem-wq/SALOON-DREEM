@@ -1,0 +1,151 @@
+name: Publish SALOON DREEM 1.2.2 release assets
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-release-1.2.2.yml"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    name: Publish permanent release downloads
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download verified Windows EXE artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: SALOON-DREEM-Windows-Portable-1.2.2
+          path: artifact/windows
+          repository: ${{ github.repository }}
+          run-id: 40841274712
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download verified Android APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: SALOON-DREEM-Android-APK-1.2.2
+          path: artifact/android
+          repository: ${{ github.repository }}
+          run-id: 40841274712
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download validated source artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: SALOON-DREEM-Source-1.2.2
+          path: artifact/source
+          repository: ${{ github.repository }}
+          run-id: 40841274712
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble distribution files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/SALOON-DREEM-Windows-1.2.2-Ready
+
+          EXE="$(find artifact/windows -type f -name 'SALOON-DREEM-Portable-1.2.2.exe' -print -quit)"
+          APK="$(find artifact/android -type f -name 'app-debug.apk' -print -quit)"
+          SOURCE="$(find artifact/source -type f -name 'SALOON-DREEM-source.tar.gz' -print -quit)"
+          test -n "$EXE" && test -s "$EXE"
+          test -n "$APK" && test -s "$APK"
+          test -n "$SOURCE" && test -s "$SOURCE"
+
+          cp "$EXE" dist/SALOON-DREEM-Portable-1.2.2.exe
+          cp "$APK" dist/SALOON-DREEM-Android-1.2.2-debug.apk
+          cp "$SOURCE" dist/SALOON-DREEM-Source-1.2.2.tar.gz
+
+          python -m pip install --disable-pip-version-check Pillow
+          python tools/make-windows-icon.py
+          cp frontend/icons/saloondreem.ico dist/SALOON-DREEM-Icon-1.2.2.ico
+
+          PKG="dist/SALOON-DREEM-Windows-1.2.2-Ready"
+          cp dist/SALOON-DREEM-Portable-1.2.2.exe "$PKG/"
+          cp dist/SALOON-DREEM-Icon-1.2.2.ico "$PKG/"
+          mkdir -p "$PKG/scripts"
+          cp scripts/Create-Desktop-Shortcut.ps1 "$PKG/scripts/"
+
+          cat > "$PKG/Create-Desktop-Shortcut.bat" <<'BAT'
+          @echo off
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Create-Desktop-Shortcut.ps1"
+          if errorlevel 1 pause
+          BAT
+
+          cat > "$PKG/README-START-HERE-AR.txt" <<'AR'
+          SALOON DREEM 1.2.2 — دليل التشغيل السريع
+
+          1) فك ضغط هذه الحزمة كاملة في مجلد دائم، مثل Documents\SALOON DREEM.
+          2) افتح SALOON-DREEM-Portable-1.2.2.exe.
+          3) عند أول تشغيل أنشئ اسم المستخدم وكلمة مرور المدير بنفسك؛ لا توجد كلمة مرور افتراضية.
+          4) لإضافة اختصار سطح المكتب شغّل Create-Desktop-Shortcut.bat بعد فك الضغط.
+          5) لا تحذف ملف EXE ولا تنقله وحده إلى مكان آخر بعد إنشاء الاختصار.
+
+          البيانات وقاعدة البيانات تحفظان في مجلد بيانات التطبيق داخل حساب Windows الحالي، ولا تنتقلان تلقائياً بنقل EXE.
+          احتفظ بنسخ احتياطية منتظمة من بيانات التطبيق قبل استخدام بيانات حقيقية.
+
+          قد يعرض Windows SmartScreen تحذيراً لأن EXE غير موقّع بشهادة ناشر تجارية.
+          ملف Android المرفق نسخة Debug للاختبار الجانبي، وليس إصدار متجر موقّعاً.
+          تشغيل Android ومزامنته يحتاجان إلى خادم API متاح عبر HTTPS؛ لا توجد استضافة عامة مرفقة.
+
+          التحصيلات في هذا الإصدار سجلات مالية داخلية وليست معالجة دفع بالبطاقات.
+          AR
+
+          cat > dist/RELEASE-NOTES-AR.md <<'NOTES'
+          # SALOON DREEM 1.2.2
+
+          - نسخة Windows Portable مع أيقونة التطبيق المضمنة.
+          - حزمة Windows جاهزة تشمل ملف EXE وأيقونة ووسيلة إنشاء اختصار على سطح المكتب.
+          - Android Debug APK للاختبار الجانبي.
+          - أرشيف المصدر الذي اجتاز التحقق الآلي.
+          - اختبارات المصدر وبناء Windows وAndroid نجحت في GitHub Actions run 40841274712.
+
+          **حدود مهمة:** ملف Windows غير موقّع بشهادة ناشر تجارية. APK ليس إصدار متجر موقّعاً. بعض الملفات الأصلية لم يمكن استعادتها من الأرشيفات التالفة؛ هذا الأرشيف يضم المصدر المستعاد والمتحقق منه وليس ضماناً لاسترجاع كل ملف تاريخي مفقود. لا تتضمن النسخة استضافة عامة أو بوابة دفع إلكترونية.
+          NOTES
+
+          (cd dist && zip -q -r -0 SALOON-DREEM-Windows-1.2.2-Ready.zip SALOON-DREEM-Windows-1.2.2-Ready)
+          unzip -t dist/SALOON-DREEM-Windows-1.2.2-Ready.zip
+          (
+            cd dist
+            sha256sum \
+              SALOON-DREEM-Portable-1.2.2.exe \
+              SALOON-DREEM-Windows-1.2.2-Ready.zip \
+              SALOON-DREEM-Android-1.2.2-debug.apk \
+              SALOON-DREEM-Source-1.2.2.tar.gz \
+              SALOON-DREEM-Icon-1.2.2.ico \
+              > SALOON-DREEM-1.2.2-SHA256SUMS.txt
+          )
+
+      - name: Publish assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSETS=(
+            "dist/SALOON-DREEM-Portable-1.2.2.exe"
+            "dist/SALOON-DREEM-Windows-1.2.2-Ready.zip"
+            "dist/SALOON-DREEM-Android-1.2.2-debug.apk"
+            "dist/SALOON-DREEM-Source-1.2.2.tar.gz"
+            "dist/SALOON-DREEM-Icon-1.2.2.ico"
+            "dist/SALOON-DREEM-1.2.2-SHA256SUMS.txt"
+          )
+          if gh release view v1.2.2 >/dev/null 2>&1; then
+            gh release upload v1.2.2 "${ASSETS[@]}" --clobber
+            gh release edit v1.2.2 --title "SALOON DREEM 1.2.2" --notes-file dist/RELEASE-NOTES-AR.md
+          else
+            gh release create v1.2.2 "${ASSETS[@]}" \
+              --target "${GITHUB_SHA}" \
+              --title "SALOON DREEM 1.2.2" \
+              --notes-file dist/RELEASE-NOTES-AR.md
+          fi
+          gh release view v1.2.2
