@@ -158,7 +158,7 @@ jobs:
               ],
               "win": {
                 "target": [{ "target": "portable", "arch": ["x64"] }],
-                "artifactName": "SALOON-DREEM-Portable-\${version}.\${ext}"
+                "artifactName": "SALOON-DREEM-Portable-1.2.1.exe"
               },
               "portable": { "artifactName": "SALOON-DREEM-Portable-\${version}.\${ext}" }
             }
@@ -189,7 +189,6 @@ jobs:
               return {"Authorization": f"Bearer {token}"}, token
 
           def test_health_setup_login_and_password_rotation(client):
-              from backend.app import main as app_module
               health = client.get("/api/health")
               assert health.status_code == 200
               assert health.json()["status"] == "ok"
@@ -254,9 +253,9 @@ jobs:
               assert "'=2+2" in export.text
 
           def test_invalid_date_filter_is_rejected(client):
-              create_admin(client)
-              response = client.get("/api/appointments?date=not-a-date", headers={"Authorization": "Bearer invalid"})
-              assert response.status_code == 401
+              headers, _ = create_admin(client)
+              response = client.get("/api/appointments?date=not-a-date", headers=headers)
+              assert response.status_code == 422
           PY
 
           cat > README.md <<'MD'
@@ -348,11 +347,6 @@ jobs:
           source = p.read_text(encoding="utf-8")
           assert 'APP_VERSION = "1.2.0"' in source
           source = source.replace('APP_VERSION = "1.2.0"', 'APP_VERSION = "1.2.1"', 1)
-
-          old_csv = '''        writer.writerow([row["id"], row["customer_name"], row["customer_phone"], row["service_name"], row["barber_name"] or "—", row["start_at"], row["end_at"], status_names.get(row["status"], row["status"]), row["price"], "مدفوع" if row["payment_status"] == "paid" else "غير مدفوع", row["notes"]])'''
-          new_csv = '''        writer.writerow([safe_csv_cell(value) for value in (row["id"], row["customer_name"], row["customer_phone"], row["service_name"], row["barber_name"] or "—", row["start_at"], row["end_at"], status_names.get(row["status"], row["status"]), row["price"], "مدفوع" if row["payment_status"] == "paid" else "غير مدفوع", row["notes"])])'''
-          assert source.count(old_csv) == 1, "CSV export row does not match the verified source"
-          source = source.replace(old_csv, new_csv, 1)
 
           # Serialize slot checks so concurrent requests do not both reserve one slot.
           appointment_check = '''    with db() as con:
