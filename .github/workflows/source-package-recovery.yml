@@ -15,61 +15,75 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Salvage archive entries where possible
+      - name: Decode source transfers without hiding corruption
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p diagnostics-recovery
-
           python - <<'PY'
           from pathlib import Path
           import base64, re
 
           out = Path("diagnostics-recovery")
+          report = []
           def join_parts(paths):
               return "".join(p.read_text(encoding="ascii").strip() for p in paths)
 
-          # Main 1.1.0 transfer set, honoring its current repair-piece convention.
           root = Path(".source-package")
           main_parts = []
           for i in range(19):
               num = f"{i:03d}"
-              repairs = sorted((root / "repair").glob(f"part-{num}-*.b64"))
-              paths = repairs if repairs else [root / f"part-{num}.b64"]
+              replacements = sorted((root / "repair").glob(f"part-{num}-*.b64"))
+              paths = replacements if replacements else [root / f"part-{num}.b64"]
               if not all(p.exists() for p in paths):
-                  raise FileNotFoundError(f"Missing source archive segment {num}")
+                  report.append(f"MAIN 1.1.0 missing part {num}")
+                  continue
               main_parts.extend(paths)
           main_text = join_parts(main_parts)
-          (out / "main-1.1.0-transfer-length.txt").write_text(
-              f"segments={len(main_parts)} chars={len(main_text)} remainder={len(main_text)%4}\n",
-              encoding="utf-8")
-          for label, text in [
+          report.append(f"MAIN 1.1.0 chars={len(main_text)} remainder={len(main_text)%4}; segments={len(main_parts)}")
+
+          sources = [
               ("main-1.1.0", main_text),
               ("package-1.2.0", join_parts(sorted(Path("restore-package-1.2.0").glob("part-*.b64")))),
               ("verified-1.2.0", join_parts(sorted(Path("restore-package-1.2.0-verified").glob("part-*.b64")))),
-          ]:
-              clean = re.sub(r"\s+", "", text)
-              if not re.fullmatch(r"[A-Za-z0-9+/=]*", clean):
-                  (out / f"{label}.status.txt").write_text("invalid Base64 characters\n", encoding="utf-8")
+          ]
+          for label, raw_text in sources:
+              text = re.sub(r"\s+", "", raw_text)
+              if not re.fullmatch(r"[A-Za-z0-9+/=]*", text):
+                  report.append(f"{label}: skipped (invalid Base64 character)")
                   continue
-              clean += "=" * ((-len(clean)) % 4)
-              payload = base64.b64decode(clean, validate=True)
-              target = out / f"{label}.damaged.zip"
-              target.write_bytes(payload)
-              (out / f"{label}.status.txt").write_text(
-                  f"Base64 decoded {len(payload)} bytes; original chars={len(text)}; original remainder={len(text)%4}\n",
-                  encoding="utf-8")
+              variants = []
+              if len(text) % 4 == 1:
+                  variants.extend([(f"{label}-drop-last-char", text[:-1]), (f"{label}-drop-first-char", text[1:])])
+              else:
+                  variants.append((label, text))
+              for variant_label, encoded in variants:
+                  padded = encoded + ("=" * ((-len(encoded)) % 4))
+                  try:
+                      payload = base64.b64decode(padded, validate=True)
+                      target = out / f"{variant_label}.damaged.zip"
+                      target.write_bytes(payload)
+                      report.append(f"{variant_label}: decoded bytes={len(payload)} chars={len(encoded)} original_remainder={len(encoded)%4}")
+                  except Exception as exc:
+                      report.append(f"{variant_label}: decode failed: {exc}")
+          (out / "decode-report.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
+          print("\n".join(report))
           PY
 
+      - name: Attempt ZIP salvage and test every recovered entry
+        shell: bash
+        run: |
+          set -u
+          shopt -s nullglob
           for candidate in diagnostics-recovery/*.damaged.zip; do
             label="$(basename "$candidate" .damaged.zip)"
             repaired="diagnostics-recovery/$label.recovered.zip"
             log="diagnostics-recovery/$label-repair.log"
             echo "=== Attempting ZIP recovery: $label ==="
             (zip -FF "$candidate" --out "$repaired" >"$log" 2>&1 || true)
-            cat "$log"
+            cat "$log" || true
             if [ -f "$repaired" ] && unzip -t "$repaired" >"diagnostics-recovery/$label-zip-test.txt" 2>&1; then
-              echo "ZIP central-directory/CRC validation passed for $label"
+              echo "ZIP central-directory and CRC validation passed: $label"
               mkdir -p "diagnostics-recovery/$label-source"
               unzip -q "$repaired" -d "diagnostics-recovery/$label-source"
               find "diagnostics-recovery/$label-source" -type f -printf '%P\n' | sort > "diagnostics-recovery/$label-inventory.txt"
@@ -81,11 +95,16 @@ jobs:
               echo "No fully CRC-valid ZIP recovery for $label"
             fi
           done
+          test -f diagnostics-recovery/decode-report.txt
 
-      - name: Upload salvage diagnostics and any fully validated source
+      - name: Upload recovery report and validated source only
         uses: actions/upload-artifact@v4
         with:
           name: saloon-dreem-source-salvage
-          path: diagnostics-recovery/**
+          path: |
+            diagnostics-recovery/*.txt
+            diagnostics-recovery/*.log
+            diagnostics-recovery/*-source/**
+            diagnostics-recovery/*.recovered-sha256.txt
           if-no-files-found: error
           retention-days: 14
