@@ -1,0 +1,89 @@
+name: Validate recoverable source bundles
+
+on:
+  push:
+    branches:
+      - audit/package-validation-1.2.0
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Try exact archive assembly variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import base64, json, re, zipfile
+
+          out = Path("diagnostics")
+          out.mkdir(exist_ok=True)
+          report = []
+
+          def read_segments(folder):
+              files = sorted(Path(folder).glob("part-*.b64"))
+              values = [p.read_text(encoding="ascii").strip() for p in files]
+              for p, value in zip(files, values):
+                  report.append(f"SEGMENT {p}: chars={len(value)} mod4={len(value)%4} valid={bool(re.fullmatch(r'[A-Za-z0-9+/=]*', value))}")
+              return files, values, "".join(values)
+
+          folder = Path("restore-package-1.2.0-verified")
+          files, values, encoded = read_segments(folder)
+          report.append(f"VERIFIED ARCHIVE: segments={len(files)} chars={len(encoded)} mod4={len(encoded)%4}")
+          variants = {"verified-raw": encoded}
+          for idx, p in enumerate(files):
+              if p.name == "part-018.b64":
+                  variants["verified-trim-first-two-from-018"] = "".join(values[:idx] + [values[idx][2:]] + values[idx+1:])
+                  variants["verified-trim-last-two-from-018"] = "".join(values[:idx] + [values[idx][:-2]] + values[idx+1:])
+          variants["verified-trim-last-two-overall"] = encoded[:-2]
+
+          small_files, small_values, small = read_segments("restore-package-1.2.0")
+          variants["package-1.2.0-alternate"] = small
+          report.append(f"ALTERNATE ARCHIVE: segments={len(small_files)} chars={len(small)} mod4={len(small)%4}")
+
+          good = []
+          for name, text in variants.items():
+              target = out / f"{name}.zip"
+              try:
+                  if not re.fullmatch(r"[A-Za-z0-9+/=]*", text):
+                      raise ValueError("non-Base64 character")
+                  padded = text + ("=" * ((-len(text)) % 4))
+                  payload = base64.b64decode(padded, validate=True)
+                  target.write_bytes(payload)
+                  if not zipfile.is_zipfile(target):
+                      raise ValueError("not a ZIP archive / missing central directory")
+                  with zipfile.ZipFile(target) as zf:
+                      bad = zf.testzip()
+                      names = zf.namelist()
+                      if bad:
+                          raise ValueError(f"ZIP CRC failure in {bad}")
+                      extract = out / name
+                      zf.extractall(extract)
+                  inventory = out / f"{name}-inventory.txt"
+                  inventory.write_text("\n".join(names) + "\n", encoding="utf-8")
+                  report.append(f"PASS {name}: bytes={len(payload)} files={len(names)} zip_sha256={__import__('hashlib').sha256(payload).hexdigest()}")
+                  good.append(name)
+              except Exception as exc:
+                  report.append(f"FAIL {name}: {type(exc).__name__}: {exc}")
+                  target.unlink(missing_ok=True)
+
+          (out / "validation-report.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
+          print("\n".join(report))
+          print(f"VALID_ARCHIVES={len(good)}")
+          PY
+
+      - name: Upload only validated archive candidates and inventories
+        uses: actions/upload-artifact@v4
+        with:
+          name: saloon-dreem-source-validation
+          path: |
+            diagnostics/**
+          if-no-files-found: error
+          retention-days: 14
