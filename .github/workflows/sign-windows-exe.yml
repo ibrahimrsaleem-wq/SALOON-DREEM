@@ -2,11 +2,6 @@ name: Sign and publish Windows EXE
 
 on:
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Existing GitHub release tag to sign"
-        required: true
-        default: "v1.2.2"
 
 permissions:
   contents: write
@@ -64,14 +59,12 @@ jobs:
 
       - name: Download the existing Windows release EXE and checksums
         shell: pwsh
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'SALOON-DREEM-Portable-1.2.2.exe' --dir dist
+          gh release download 'v1.2.2' --repo $env:GITHUB_REPOSITORY --pattern 'SALOON-DREEM-Portable-1.2.2.exe' --dir dist
           if ($LASTEXITCODE -ne 0) { throw 'Could not download the Windows EXE from the selected GitHub Release.' }
-          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'SALOON-DREEM-1.2.2-SHA256SUMS.txt' --dir dist
+          gh release download 'v1.2.2' --repo $env:GITHUB_REPOSITORY --pattern 'SALOON-DREEM-1.2.2-SHA256SUMS.txt' --dir dist
           if ($LASTEXITCODE -ne 0) { throw 'Could not download the release SHA-256 file.' }
           if (-not (Test-Path 'dist/SALOON-DREEM-Portable-1.2.2.exe')) { throw 'The release EXE was not found.' }
 
@@ -79,7 +72,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $programFilesX86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+          $sdkRoot = Join-Path $programFilesX86 'Windows Kits\10\bin'
           $signtool = Get-ChildItem -LiteralPath $sdkRoot -Filter 'signtool.exe' -Recurse -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
             Sort-Object FullName -Descending |
@@ -123,10 +117,8 @@ jobs:
 
       - name: Publish signed EXE and updated checksum to GitHub Release
         shell: pwsh
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           $ErrorActionPreference = 'Stop'
-          gh release upload $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY 'dist/SALOON-DREEM-Portable-1.2.2.exe' 'dist/SALOON-DREEM-1.2.2-SHA256SUMS.txt' --clobber
+          gh release upload 'v1.2.2' --repo $env:GITHUB_REPOSITORY 'dist/SALOON-DREEM-Portable-1.2.2.exe' 'dist/SALOON-DREEM-1.2.2-SHA256SUMS.txt' --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Could not publish the signed EXE and updated checksums.' }
-          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY
+          gh release view 'v1.2.2' --repo $env:GITHUB_REPOSITORY
