@@ -6,6 +6,10 @@ on:
       - audit/package-validation-1.2.0
   workflow_dispatch:
 
+concurrency:
+  group: source-recovery-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
