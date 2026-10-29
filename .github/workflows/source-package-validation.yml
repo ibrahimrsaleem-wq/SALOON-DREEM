@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - audit/package-validation-1.2.0
+    paths:
+      - '.source-package/**'
+      - 'restore-package-1.2.0/**'
+      - 'restore-package-1.2.0-verified/**'
+      - '.github/workflows/source-package-validation.yml'
   workflow_dispatch:
 
 permissions:
