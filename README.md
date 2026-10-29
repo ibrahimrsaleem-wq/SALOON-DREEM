@@ -44,3 +44,5 @@ The automated Windows EXE and Android APK builds run in GitHub Actions. Use the 
 Android build configuration now creates the Gradle project before any Gradle cache is attempted.
 
 The latest release-candidate run includes fixes for Windows asset bundling and Android build initialization.
+
+The Android pipeline now uses the supported Android SDK setup action and avoids the retired legacy `tools` SDK package.
