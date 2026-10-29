@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const APP_TITLE = 'SALOON DREEM';
+const APP_ICON = path.join(__dirname, '..', 'frontend', 'icons', 'saloondreem.ico');
 let mainWindow = null;
 let serverProcess = null;
 let serverLogFd = null;
@@ -80,6 +81,7 @@ async function createMainWindow() {
     minHeight: 620,
     show: false,
     title: APP_TITLE,
+    icon: fs.existsSync(APP_ICON) ? APP_ICON : undefined,
     backgroundColor: '#101916',
     autoHideMenuBar: true,
     webPreferences: {
