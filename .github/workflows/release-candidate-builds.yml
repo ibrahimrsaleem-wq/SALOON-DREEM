@@ -111,7 +111,7 @@ jobs:
             --distpath dist/server `
             --workpath build/pyinstaller `
             --specpath build/spec `
-            --add-data "frontend;frontend" `
+            --add-data "$env:GITHUB_WORKSPACE\frontend;frontend" `
             --collect-all fastapi `
             --collect-all starlette `
             --collect-all uvicorn `
