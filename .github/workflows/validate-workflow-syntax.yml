@@ -1,0 +1,41 @@
+name: Validate CI workflow YAML syntax
+
+on:
+  push:
+    branches: [release/1.2.1]
+    paths:
+      - '.github/workflows/validate-workflow-syntax.yml'
+      - '.github/workflows/assemble-recovered-source.yml'
+      - '.github/workflows/release-candidate-builds.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate-yaml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Parse project workflow files
+        run: |
+          python -m pip install pyyaml
+          python - <<'PY'
+          import yaml
+          from pathlib import Path
+          paths = [
+              Path(".github/workflows/assemble-recovered-source.yml"),
+              Path(".github/workflows/release-candidate-builds.yml"),
+              Path(".github/workflows/validate-workflow-syntax.yml"),
+          ]
+          for path in paths:
+              try:
+                  with path.open(encoding="utf-8") as f:
+                      yaml.compose(f)
+                  print(f"YAML syntax OK: {path}")
+              except Exception as exc:
+                  print(f"YAML syntax ERROR: {path}: {exc}")
+                  raise
+          PY

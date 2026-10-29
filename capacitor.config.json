@@ -1,0 +1,6 @@
+{
+  "appId": "com.saloondreem.app",
+  "appName": "SALOON DREEM",
+  "webDir": "frontend",
+  "server": { "androidScheme": "https" }
+}

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#121b1a">
+  <meta name="description" content="SALOON DREEM — إدارة صالون الحلاقة والحجوزات والعملاء والمالية في مكان واحد.">
+  <meta name="application-name" content="SALOON DREEM">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/styles.css">
+  <title>SALOON DREEM | إدارة الصالون</title>
+</head>
+<body>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+  <main id="auth-screen" class="auth-screen">
+    <section class="auth-story">
+      <div class="brand-lockup"><span class="brand-symbol">D<span>✦</span></span><div><strong>SALOON DREEM</strong><small>BARBER STUDIO · MANAGEMENT</small></div></div>
+      <div class="auth-story-copy"><span class="eyebrow">YOUR CRAFT. YOUR BUSINESS.</span><h1>كل موعد،<br><em>بتفاصيله.</em></h1><p>من أول حجز لآخر حساب في اليوم، إدارة أهدأ، خدمة أرقى، وصورة أوضح لأعمال صالونك.</p></div>
+      <div class="auth-highlights"><div><span>01</span><strong>مواعيد بلا تضارب</strong><small>جدول واضح لفريقك</small></div><div><span>02</span><strong>حسابات مرتبة</strong><small>إيرادات ومصروفات في مكان واحد</small></div><div><span>03</span><strong>عملاء يعودون</strong><small>خدمة منظمة وتجربة أجمل</small></div></div>
+      <div class="story-footer"><span class="story-line"></span><span>صُمّم ليليق بتفاصيل شغلك.</span></div>
+      <div class="auth-watermark">D</div>
+    </section>
+    <section class="auth-panel">
+      <form id="auth-form" class="auth-card">
+        <div class="auth-mark">D</div>
+        <p class="eyebrow" id="auth-eyebrow">مساحة عملك</p>
+        <h2 id="auth-title">أهلًا بعودتك</h2>
+        <p class="muted" id="auth-description">سجّل الدخول لإدارة صالونك.</p>
+        <label id="business-name-wrap" class="field hidden"><span>اسم الصالون</span><input id="setup-business-name" name="business_name" value="SALOON DREEM" autocomplete="organization"></label>
+        <label class="field"><span>اسم المستخدم</span><input id="auth-username" name="username" required minlength="3" autocomplete="username" placeholder="مثال: admin"></label>
+        <label class="field"><span>كلمة المرور</span><input id="auth-password" name="password" type="password" required minlength="8" autocomplete="current-password" placeholder="٨ أحرف على الأقل"></label>
+        <label id="confirm-password-wrap" class="field hidden"><span>تأكيد كلمة المرور</span><input id="auth-password-confirm" type="password" minlength="8" autocomplete="new-password" placeholder="أعد إدخال كلمة المرور"></label>
+        <button id="auth-submit" class="button button-primary button-wide" type="submit">تسجيل الدخول <span>←</span></button>
+        <p class="auth-footnote" id="auth-footnote">بيانات الإدارة محفوظة في قاعدة بيانات الصالون على هذا الجهاز.</p>
+        <div class="auth-separator"><span>أو</span></div>
+        <button id="customer-entry" class="button button-secondary button-wide" type="button">أنا عميل — استكشف الخدمات واحجز موعدًا</button>
+        <details class="server-config"><summary>إعداد الاتصال بالخادم</summary><p>للنسخة المحمولة، أدخل رابط الخادم المنشور الذي يستضيف واجهة API. اتركه فارغًا عند التشغيل على نفس جهاز الخادم.</p><div class="inline-field"><input id="api-base-input" type="url" inputmode="url" placeholder="https://your-salon-server.example.com" aria-label="رابط الخادم"><button id="save-api-base" class="button button-small" type="button">حفظ</button></div></details>
+      </form>
+      <div class="auth-bottom"><span>© SALOON DREEM</span><span>خصوصية · تنظيم · احتراف</span></div>
+    </section>
+  </main>
+
+  <main id="customer-screen" class="customer-screen hidden">
+    <header class="customer-header"><a class="customer-brand" href="#discover" data-customer-view="discover"><span class="brand-symbol">D<span>✦</span></span><span><strong>SALOON DREEM</strong><small>BARBER STUDIO</small></span></a><button id="customer-admin-entry" class="button button-outline" type="button">دخول إدارة الصالون</button></header>
+    <div class="customer-main"><aside class="customer-rail"><div class="customer-greeting"><span class="eyebrow">THE DREEM EXPERIENCE</span><h2>اهتمّ بتفاصيلك.</h2><p>خدمة على مزاجك، وموعد يناسب يومك.</p></div><nav class="customer-nav" aria-label="قائمة العميل"><button data-customer-view="discover" class="customer-nav-item active">✧ <span>استكشف الخدمات</span></button><button data-customer-view="book" class="customer-nav-item">＋ <span>احجز موعدًا</span></button><button data-customer-view="mybookings" class="customer-nav-item">◷ <span>مواعيدي</span></button><button data-customer-view="loyalty" class="customer-nav-item">✦ <span>مكافآتي</span></button><button data-customer-view="profile" class="customer-nav-item">♙ <span>ملفي الشخصي</span></button></nav><div class="customer-rail-foot"><span class="status-dot"></span> حجز مباشر مع الصالون</div></aside><section id="customer-content" class="customer-content" aria-live="polite"></section></div>
+    <footer class="customer-footer"><span>تجربة SALOON DREEM</span><span>الحجوزات تخضع لتأكيد فريق الصالون</span></footer>
+  </main>
+
+  <div id="app-shell" class="app-shell hidden">
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-brand"><span class="brand-symbol">D<span>✦</span></span><div><strong>SALOON<br>DREEM</strong><small>BARBER STUDIO</small></div><button id="sidebar-close" class="icon-button mobile-only" aria-label="إغلاق القائمة">✕</button></div>
+      <div class="salon-switcher"><span class="salon-avatar">SD</span><div><strong id="sidebar-salon-name">SALOON DREEM</strong><small><i class="status-dot"></i> مساحة العمل</small></div><span class="switcher-chevron">⌄</span></div>
+      <p class="nav-label">إدارة الصالون</p>
+      <nav class="nav-list" aria-label="القائمة الرئيسية"><button class="nav-item active" data-view="dashboard"><span class="nav-icon">◫</span><span>نظرة عامة</span></button><button class="nav-item" data-view="appointments"><span class="nav-icon">▦</span><span>المواعيد والتقويم</span><span id="nav-pending" class="nav-count hidden">0</span></button><button class="nav-item" data-view="customers"><span class="nav-icon">♙</span><span>العملاء</span></button><button class="nav-item" data-view="barbers"><span class="nav-icon">✂</span><span>فريق الحلاقين</span></button><button class="nav-item" data-view="services"><span class="nav-icon">◇</span><span>الخدمات والأسعار</span></button></nav>
+      <p class="nav-label nav-label-spaced">الأعمال</p><nav class="nav-list"><button class="nav-item" data-view="finance"><span class="nav-icon">↗</span><span>المالية والصندوق</span></button><button class="nav-item" data-view="reports"><span class="nav-icon">▤</span><span>التقارير والتصدير</span></button><button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span><span>الإعدادات</span></button></nav>
+      <div class="sidebar-bottom"><div class="sidebar-tip"><span class="tip-spark">✦</span><strong>خدمة أرقى، إدارة أذكى.</strong><p>نظّم يومك حتى تركز على شغلك.</p></div><button id="logout-button" class="nav-item logout-item"><span class="nav-icon">↪</span><span>تسجيل الخروج</span></button><div class="account-row"><span class="user-avatar">SD</span><div><strong id="account-username">المدير</strong><small>مدير الصالون</small></div><button id="account-menu" class="icon-button" aria-label="تغيير كلمة المرور" title="تغيير كلمة المرور">•••</button></div></div>
+    </aside>
+    <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
+    <main class="main-area"><header class="topbar"><div class="topbar-start"><button id="menu-toggle" class="icon-button mobile-only" aria-label="فتح القائمة">☰</button><div><p class="topbar-kicker" id="topbar-kicker">مساحة عملك · اليوم</p><h1 id="page-title">نظرة عامة</h1></div></div><div class="topbar-actions"><div class="today-chip"><span>◷</span><span id="today-label"></span></div><button id="theme-toggle" class="icon-button theme-toggle" aria-label="تبديل المظهر" title="تبديل المظهر">◐</button><button id="open-customer-portal" class="button button-outline" type="button">بوابة العميل</button><button class="button button-primary topbar-book" id="quick-book"><span class="plus">＋</span> حجز جديد</button></div></header><section id="page-content" class="page-content" aria-live="polite"></section><footer class="app-footer"><span>صُنع بعناية لصالونك.</span><span>SALOON DREEM <b>•</b> الإصدار 1.2.1</span></footer></main>
+  </div>
+
+  <div id="modal-root"></div>
+  <script src="/runtime-config.js"></script>
+  <script src="/app.js" defer></script>
+  <script>if ('serviceWorker' in navigator && location.protocol.startsWith('http')) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));</script>
+</body>
+</html>

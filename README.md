@@ -1,29 +1,61 @@
-# SALOON DREEM — 1.1.0
+# SALOON DREEM — نظام إدارة صالون الحلاقة
 
-Arabic-first salon and barber-shop management application.
+تطبيق عربي باتجاه RTL لإدارة الحجوزات، الحلاقين، الخدمات والأسعار، العملاء، التحصيلات المالية والمصروفات، والإعدادات. يعتمد على **FastAPI + SQLite** مع واجهة ويب متجاوبة وتجهيزات PWA ونسختين قابلتين للبناء على Windows وAndroid.
 
-## Full source package
-The complete application source, tests, documentation, desktop/mobile configuration and build workflows are provided in **SALOON-DREEM-1.1.0-source.zip** in this repository. Download the ZIP and extract it to work with the source tree.
+**الإصدار الحالي: 1.2.1 — نسخة مرشحة للاستعادة والتوزيع.** أُعيد تجميع شجرة مصدر قابلة للتشغيل بعد اكتشاف أن حزم المصدر القديمة لم تعد سليمة بالكامل. استُخدمت الملفات التي اجتازت فحص CRC، بينما تستخدم الواجهة حزمة JavaScript المولّدة \`frontend/app.js\` لأن ملف TypeScript الأصلي لم يمكن استعادته بثقة.
 
-## Included
-- FastAPI backend and SQLite data store
-- Arabic right-to-left responsive client and salon management interface
-- Appointment scheduling and conflict checks
-- Barbers, services, customers and cash ledger
-- PWA/mobile configuration and Electron/Windows packaging setup
-- Tests, Docker configuration, CI/build workflow source and deployment documentation
+## الميزات
 
-## Quick start (Windows)
-1. Download and extract the source ZIP.
-2. Install Python 3.12 or 3.13.
-3. Run `RUN-SALOON-DREEM.bat`.
-4. Open the local URL printed by the launcher and create the initial admin account.
+- لوحة إدارة: ملخص، المواعيد والتقويم، العملاء، فريق الحلاقين، الخدمات والأسعار، المالية والصندوق، التقارير، والإعدادات.
+- بوابة عميل لاستعراض الخدمات وإنشاء حجز ومراجعة ملف العميل المحلي.
+- إعداد أول حساب مدير، تسجيل الدخول، تغيير كلمة المرور وإبطال الجلسات القديمة.
+- التحقق من توافر الموعد ومنع التعارض، وتسجيل التحصيل مرة واحدة، وملخص مالي وتصدير CSV.
+- واجهة عربية RTL، تصميم متجاوب، الوضع الفاتح والداكن، وتخزين غلاف الواجهة الثابت عبر Service Worker.
+- تصدير CSV مع تعقيم الخلايا التي قد تُفسّر كمعادلات، ومعاملات SQLite لحماية فحوصات الحجوزات والتحصيلات من بعض حالات التزامن.
 
-## Validation report
-The supplied source package was checked with 7 API tests, TypeScript checking, JavaScript syntax checking and Python compile checks.
+## تشغيل المشروع على Windows من المصدر
 
-## Important deployment notes
-This is an initial runnable release, not yet a fully operated production service. Cloud multi-device hosting, external payments, WhatsApp/SMS notifications and live Android API hosting need additional deployment and integration configuration. The Android app needs a reachable HTTPS API endpoint.
+ثبّت Python 3.12 أو 3.13 وNode.js 22.12 أو أحدث، ثم افتح PowerShell في مجلد المشروع:
 
-## Security
-Do not commit a real `.env`, database, access token or production secret. Use `.env.example` as a template.
+\`\`\`powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\RUN-SALOON-DREEM.ps1
+\`\`\`
+
+أو شغّل \`RUN-SALOON-DREEM.bat\`. افتح \`http://127.0.0.1:8000\` وأنشئ حساب المدير عند أول تشغيل؛ لا توجد كلمة مرور افتراضية. أضف حلاقًا نشطًا وخدمات وأسعارًا قبل استقبال حجوزات حقيقية.
+
+## ملف Windows المحمول
+
+يُنتج البناء الملف \`SALOON-DREEM-Portable-1.2.1.exe\` بعد تجميع خادم FastAPI ودمجه مع Electron. لا يتطلب مثبتًا تقليديًا، لكن قاعدة بيانات Windows تُحفظ في مجلد بيانات المستخدم الخاص بالتطبيق وليس بجانب الملف التنفيذي؛ نسخ EXE إلى جهاز آخر لا ينقل بيانات الجهاز الأصلي تلقائيًا. الملف غير موقّع بشهادة ناشر تجارية، لذا قد يعرض Windows SmartScreen تنبيهًا.
+
+## تطبيق Android
+
+ينتج البناء \`app-debug.apk\` للتثبيت والاختبار والتوزيع الجانبي، وليس نسخة متجر موقّعة. يحتاج التطبيق على الهاتف إلى خادم API يمكن الوصول إليه عبر HTTPS:
+
+- عيّن متغير GitHub Actions باسم \`MOBILE_API_BASE_URL\` إلى عنوان HTTPS لخادمك عند البناء، أو أدخل عنوان الخادم من شاشة إعداد الاتصال.
+- عند ترك العنوان فارغًا، لا توجد خدمة خلفية عامة مضمنة في APK، ولن تتم مزامنة بيانات الصالون مع الكمبيوتر تلقائيًا.
+- لا تخزّن الواجهة استجابات API في Service Worker؛ يلزم اتصال فعّال بالخادم لإجراء الحجوزات أو تعديل البيانات.
+
+## الاختبار والبناء
+
+\`\`\`bash
+python -m pip install -r requirements.txt
+python -m pytest -q
+npm ci
+npm run build:web
+npm run check:js
+\`\`\`
+
+تتضمن GitHub Actions اختبارات API، وفحوص Python وJavaScript، واختبار صحة خادم Windows المجمّع، وبناء Windows Portable EXE وAndroid Debug APK. تحقق من نجاح كل المهام قبل اعتماد أي أثر بناء.
+
+- فرع المصدر: https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/tree/release/1.2.1
+- سجل البناء الحالي: https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/actions
+
+## الحدود المعروفة قبل الاستخدام التجاري
+
+- التحصيل الحالي تسجيل محاسبي داخلي، وليس بوابة دفع إلكتروني أو معالجة بطاقات.
+- لا توجد تكاملات فعّالة لـ SMS/OTP أو WhatsApp أو Google Calendar في هذا الإصدار.
+- يعتمد جزء من ملف العميل والمكافآت على التخزين المحلي للمتصفح؛ مزامنة هوية عميل موثقة عبر الأجهزة تحتاج تطويرًا إضافيًا.
+- SQLite مناسبة للتشغيل المحلي أو الاستخدام المحدود. النشر العام أو متعدد الفروع يتطلب خادمًا موثوقًا، HTTPS، نسخًا احتياطية مجرّبة، ومراقبة وتحديد معدل مركزيًا.
+- لم تُستعد كل الملفات الأصلية بعد تلف بعض الأرشيفات. راجع \`AUDIT-REPORT-1.2.1.md\` لمعرفة ما جرى التحقق منه وما لا يزال مطلوبًا.
+- الاختبارات الآلية لا تغني عن تجربة قبول يدوية على أجهزة Windows وAndroid ومراجعة أمنية قبل استخدام بيانات حقيقية.
