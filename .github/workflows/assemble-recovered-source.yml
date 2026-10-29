@@ -1,0 +1,406 @@
+name: Assemble and validate SALOON DREEM source
+
+on:
+  push:
+    branches: [release/1.2.1]
+    paths:
+      - '.github/workflows/assemble-recovered-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: saloon-dreem-source-assembly
+  cancel-in-progress: false
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+
+      - name: Fetch individually CRC-verified recovered source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin audit/package-validation-1.2.0
+          mkdir -p "$RUNNER_TEMP/source-recovery"
+          git archive origin/audit/package-validation-1.2.0 \
+            RecoveredSource/main-1.1.0-drop-last-char/SALOON-DREEM \
+            RecoveredSource/package-1.2.0/SALOON-DREEM \
+            RecoveredSource/verified-1.2.0/SALOON-DREEM \
+            | tar -x -C "$RUNNER_TEMP/source-recovery"
+          echo "Recovered files fetched from the forensic audit branch."
+
+      - name: Assemble clean runnable source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          R="$RUNNER_TEMP/source-recovery/RecoveredSource"
+          S11="$R/main-1.1.0-drop-last-char/SALOON-DREEM"
+          S12="$R/package-1.2.0/SALOON-DREEM"
+          SV="$R/verified-1.2.0/SALOON-DREEM"
+
+          test -s "$S11/frontend/app.js"
+          test -s "$S11/frontend/index.html"
+          test -s "$S12/backend/app/main.py"
+          test -s "$SV/package.json"
+          test -s "$SV/frontend/styles.css"
+
+          mkdir -p backend/app frontend/icons desktop tools tests scripts data
+          cp "$S11/backend/__init__.py" backend/__init__.py
+          cp "$S11/backend/app/__init__.py" backend/app/__init__.py
+          cp "$S12/backend/app/main.py" backend/app/main.py
+          cp "$SV/backend/app/server_entry.py" backend/app/server_entry.py
+          cp "$S11/frontend/app.js" frontend/app.js
+          cp "$S11/frontend/index.html" frontend/index.html
+          cp "$S11/frontend/manifest.webmanifest" frontend/manifest.webmanifest
+          cp "$S11/frontend/icons/icon.svg" frontend/icons/icon.svg
+          cp "$S11/frontend/icons/icon-192.png" frontend/icons/icon-192.png
+          cp "$S11/frontend/icons/icon-512.png" frontend/icons/icon-512.png
+          cp "$SV/frontend/styles.css" frontend/styles.css
+          cp "$SV/frontend/runtime-config.js" frontend/runtime-config.js
+          cp "$SV/desktop/main.cjs" desktop/main.cjs
+          cp "$SV/tools/configure-mobile.mjs" tools/configure-mobile.mjs
+          cp "$S11/.env.example" .env.example
+          cp "$SV/.gitignore" .gitignore
+          cp "$S11/.nvmrc" .nvmrc
+          cp "$S11/RUN-SALOON-DREEM.ps1" RUN-SALOON-DREEM.ps1
+          cp "$S11/RUN-SALOON-DREEM.bat" RUN-SALOON-DREEM.bat
+          cp "$S11/SECURITY.md" SECURITY.md
+          cp "$S11/Dockerfile" Dockerfile
+          cp "$SV/docker-compose.yml" docker-compose.yml
+          cp "$SV/requirements.txt" requirements.txt
+          cp "$SV/requirements-build.txt" requirements-build.txt
+          cp "$SV/pyproject.toml" pyproject.toml
+          cp "$S11/tests/conftest.py" tests/conftest.py
+          touch data/.gitkeep
+
+          cat > server.py <<'PY'
+          """PyInstaller and local entry point for the FastAPI server."""
+          from backend.app.server_entry import main
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+          cat > tools/build-web.mjs <<'JS'
+          import { access, readFile } from 'node:fs/promises';
+          import { constants } from 'node:fs';
+          import { fileURLToPath } from 'node:url';
+          import path from 'node:path';
+
+          const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+          const required = [
+            'frontend/index.html',
+            'frontend/app.js',
+            'frontend/styles.css',
+            'frontend/runtime-config.js',
+            'frontend/manifest.webmanifest',
+            'backend/app/main.py',
+            'desktop/main.cjs'
+          ];
+          for (const relative of required) {
+            try { await access(path.join(root, relative), constants.R_OK); }
+            catch { throw new Error('Required app asset is missing: ' + relative); }
+          }
+          const html = await readFile(path.join(root, 'frontend/index.html'), 'utf8');
+          for (const asset of ['styles.css', 'manifest.webmanifest', 'app.js']) {
+            if (!html.includes(asset)) throw new Error('frontend/index.html does not reference ' + asset);
+          }
+          console.log('Required web assets are present. Using the recovered prebuilt browser bundle frontend/app.js.');
+          JS
+
+          cat > package.json <<'JSON'
+          {
+            "name": "saloon-dreem",
+            "version": "1.2.1",
+            "private": true,
+            "description": "Arabic-first barber salon appointments and business management app",
+            "license": "UNLICENSED",
+            "main": "desktop/main.cjs",
+            "scripts": {
+              "build:web": "node tools/build-web.mjs",
+              "check:js": "node --check frontend/app.js && node --check desktop/main.cjs && node --check frontend/runtime-config.js && node --check tools/configure-mobile.mjs && node --check tools/build-web.mjs",
+              "test:python": "python -m pytest -q",
+              "desktop": "electron .",
+              "dist:win": "npm run build:web && electron-builder --win portable",
+              "mobile:prepare": "npm run build:web && node tools/configure-mobile.mjs && npx cap sync android",
+              "mobile:android:debug": "npm run mobile:prepare && cd android && gradlew.bat assembleDebug"
+            },
+            "engines": { "node": ">=22.12.0" },
+            "devDependencies": {
+              "@capacitor/android": "^8.5.3",
+              "@capacitor/cli": "^8.5.3",
+              "@capacitor/core": "^8.5.3",
+              "electron": "^45.1.0",
+              "electron-builder": "^26.0.0",
+              "typescript": "^5.8.3"
+            },
+            "dependencies": {},
+            "build": {
+              "appId": "com.saloondreem.app",
+              "productName": "SALOON DREEM",
+              "asar": true,
+              "directories": { "output": "dist-electron" },
+              "files": ["desktop/**/*", "frontend/**/*", "package.json"],
+              "extraResources": [
+                { "from": "dist/server/saloon-dreem-server.exe", "to": "server/saloon-dreem-server.exe" }
+              ],
+              "win": {
+                "target": [{ "target": "portable", "arch": ["x64"] }],
+                "artifactName": "SALOON-DREEM-Portable-\${version}.\${ext}"
+              },
+              "portable": { "artifactName": "SALOON-DREEM-Portable-\${version}.\${ext}" }
+            }
+          }
+          JSON
+
+          cat > capacitor.config.json <<'JSON'
+          {
+            "appId": "com.saloondreem.app",
+            "appName": "SALOON DREEM",
+            "webDir": "frontend",
+            "server": { "androidScheme": "https" }
+          }
+          JSON
+
+          cat > tests/test_api.py <<'PY'
+          from __future__ import annotations
+
+          from datetime import timedelta
+
+          def create_admin(client):
+              response = client.post(
+                  "/api/setup",
+                  json={"username": "owner.test", "password": "Strong-Password-123", "business_name": "Dreem Test"},
+              )
+              assert response.status_code == 201, response.text
+              token = response.json()["access_token"]
+              return {"Authorization": f"Bearer {token}"}, token
+
+          def test_health_setup_login_and_password_rotation(client):
+              from backend.app import main as app_module
+              health = client.get("/api/health")
+              assert health.status_code == 200
+              assert health.json()["status"] == "ok"
+              assert health.json()["version"] == "1.2.1"
+              assert client.get("/api/setup/status").json()["setup_required"] is True
+
+              headers, old_token = create_admin(client)
+              assert client.get("/api/auth/me", headers=headers).status_code == 200
+              assert client.get("/api/setup/status").json()["setup_required"] is False
+              duplicate = client.post(
+                  "/api/setup",
+                  json={"username": "other.admin", "password": "Strong-Password-123", "business_name": "Other"},
+              )
+              assert duplicate.status_code == 409
+
+              changed = client.post(
+                  "/api/auth/change-password",
+                  headers=headers,
+                  json={"current_password": "Strong-Password-123", "new_password": "New-Strong-Password-456"},
+              )
+              assert changed.status_code == 200
+              assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {old_token}"}).status_code == 401
+              login = client.post(
+                  "/api/auth/login",
+                  json={"username": "owner.test", "password": "New-Strong-Password-456"},
+              )
+              assert login.status_code == 200
+
+          def test_public_booking_conflict_payment_and_csv_safety(client):
+              from backend.app import main as app_module
+              headers, _ = create_admin(client)
+              barber_response = client.post(
+                  "/api/barbers",
+                  headers=headers,
+                  json={"name": "Test Barber", "phone": "0599000123", "specialty": "قص شعر", "active": True},
+              )
+              assert barber_response.status_code == 201, barber_response.text
+              barber = barber_response.json().get("barber", barber_response.json())
+              service = client.get("/api/public/services").json()[0]
+              booking_day = (app_module.now_local().date() + timedelta(days=3)).isoformat()
+              booking_data = {
+                  "customer_name": "=2+2",
+                  "customer_phone": "0599000999",
+                  "service_id": service["id"],
+                  "barber_id": barber["id"],
+                  "start_at": f"{booking_day}T10:00",
+                  "notes": "API test",
+              }
+              booked = client.post("/api/public/appointments", json=booking_data)
+              assert booked.status_code == 201, booked.text
+              appointment_id = booked.json()["appointment"]["id"]
+
+              conflict = client.post("/api/public/appointments", json=booking_data)
+              assert conflict.status_code == 409, conflict.text
+              paid = client.post(f"/api/appointments/{appointment_id}/pay", headers=headers)
+              assert paid.status_code == 200, paid.text
+              assert client.post(f"/api/appointments/{appointment_id}/pay", headers=headers).status_code == 409
+
+              assert client.get("/api/finance/summary", headers=headers).status_code == 200
+              export = client.get("/api/export/appointments.csv", headers=headers)
+              assert export.status_code == 200
+              assert "'=2+2" in export.text
+
+          def test_invalid_date_filter_is_rejected(client):
+              create_admin(client)
+              response = client.get("/api/appointments?date=not-a-date", headers={"Authorization": "Bearer invalid"})
+              assert response.status_code == 401
+          PY
+
+          cat > README.md <<'MD'
+          # SALOON DREEM — نظام إدارة صالون الحلاقة
+
+          تطبيق عربي RTL لإدارة الحجوزات، الحلاقين، الخدمات والأسعار، العملاء، تسجيل التحصيلات والمصروفات، والإعدادات. يعتمد على FastAPI وSQLite، بواجهة ويب متجاوبة وتهيئة PWA ونسخ تغليف Windows وAndroid.
+
+          **الإصدار 1.2.1 هو مرشح استعادة وبناء.** أُعيد تجميع شجرة المشروع من الملفات التي أمكن التحقق من سلامة CRC الخاصة بها من حزم المصدر السابقة. لم نتمكن من استعادة أرشيف المصدر كاملاً أو ملف TypeScript الأصلي؛ تستخدم الواجهة الحزمة المولّدة frontend/app.js.
+
+          ## تشغيل من المصدر على Windows
+          ثبّت Python 3.12 أو 3.13 وNode.js 22.12 أو أحدث، ثم شغّل RUN-SALOON-DREEM.bat. يمكن استخدام PowerShell:
+          \`\`\`powershell
+          Set-ExecutionPolicy -Scope Process Bypass
+          .\\RUN-SALOON-DREEM.ps1
+          \`\`\`
+          افتح http://127.0.0.1:8000 وأنشئ حساب المدير في أول تشغيل؛ لا توجد كلمة مرور افتراضية. أضف حلاقًا نشطًا قبل استقبال حجوزات فعلية.
+
+          ## الوظائف الأساسية
+          - إعداد حساب مدير، تسجيل دخول وتغيير كلمة المرور وإبطال الجلسات القديمة.
+          - حجز عميل وحفظه في قاعدة بيانات الصالون، منع تضارب الحلاق وساعات العمل والحجوزات في الماضي.
+          - إدارة المواعيد والحلاقين والعملاء والخدمات والأسعار.
+          - دفتر دخل ومصروفات وملخص مالي وتحصيل الموعد مرة واحدة وتصدير الحجوزات CSV.
+          - كلمات مرور PBKDF2-HMAC-SHA256، جلسات موقّعة، حدّ أولي للمحاولات، ورؤوس أمن أساسية.
+          - واجهة عربية RTL، تصميم متجاوب، وضع فاتح/داكن، وملفات PWA.
+
+          ## Windows Portable EXE
+          ينتج سير العمل SALOON-DREEM-Portable-1.2.1.exe بعد تجميع خادم FastAPI في ملف مستقل وتغليفه مع Electron. تُحفظ قاعدة البيانات في مجلد بيانات المستخدم الخاص بالتطبيق وليس بجوار الملف التنفيذي. لا يوجد توقيع تجاري للناشر، وقد يعرض Windows SmartScreen تحذيرًا.
+
+          ## Android APK
+          ينتج سير العمل app-debug.apk للتثبيت والاختبار الجانبي، وليس حزمة متجر موقّعة. يحتاج تطبيق Android إلى خادم API متاح للهاتف عبر HTTPS: عيّن متغير GitHub Actions باسم MOBILE_API_BASE_URL إلى عنوان HTTPS لخادمك؛ إذا تركته فارغًا فاضبط الاتصال من التطبيق إن ظهر الخيار. لا تأتي مع الحزمة استضافة عامة جاهزة، ولا يمكنها مشاركة قاعدة بيانات الكمبيوتر تلقائيًا دون نشر API.
+
+          ## اختبار المشروع
+          شغّل python -m pip install -r requirements.txt ثم python -m pytest -q، وبعدها npm ci وnpm run build:web وnpm run check:js. تحقق من نجاح GitHub Actions قبل اعتماد الملفين التنفيذيين.
+
+          ## حدود مهمة
+          - التحصيل الحالي تسجيل محاسبي داخلي، وليس بوابة دفع إلكتروني.
+          - لا توجد تكاملات فعالة لـ SMS/OTP أو WhatsApp أو Google Calendar ولا مفاتيح توقيع تجارية.
+          - ملف العميل وسجلّه الشخصي في الواجهة يعتمد جزئيًا على التخزين المحلي؛ المزامنة الآمنة عبر الأجهزة تحتاج هوية عميل موثقة.
+          - SQLite مناسب لتشغيل محلي أو حمل صغير. الاستضافة العامة تتطلب HTTPS وتخزينًا دائمًا ونسخًا احتياطية وتحديد معدل مركزيًا ومراجعة أمنية.
+          - اجتياز الاختبارات الآلية لا يغني عن تجربة قبول على Windows وAndroid قبل استخدام بيانات حقيقية.
+          MD
+
+          cat > CHANGELOG.md <<'MD'
+          # Changelog
+          ## 1.2.1 — Recovery candidate
+          - Reassembled runnable source from individually CRC-verified files.
+          - Added release validation and portable Windows / Android debug build workflows.
+          - Applied CSV formula neutralization to exported appointment fields.
+          - Added SQLite immediate locking around appointment creation and payment recording.
+          - Documented Android's HTTPS API requirement and external payment limitations.
+          - The original TypeScript source and original ZIP were not fully recovered; the checked-in browser JavaScript bundle is used.
+          MD
+
+          cat > BUILD-STATUS.md <<'MD'
+          # Build status — SALOON DREEM 1.2.1
+
+          This is a source-recovery candidate. The prior encoded ZIP files were incomplete or corrupt, so the source tree was reconstructed from individually CRC-verified files. This does not imply every original file has been recovered.
+
+          Release acceptance requires API/business-rule tests, Python compile checks, JavaScript asset checks, a Windows API executable health test, an Electron portable EXE build, and an Android APK build. The current GitHub Actions result and artifacts are authoritative. No hosted production API, signed app-store package, publisher certificate or external payment/OTP integration is included.
+          MD
+
+          cat > scripts/Create-Desktop-Shortcut.ps1 <<'PS1'
+          $ErrorActionPreference = 'Stop'
+          $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+          $Exe = Get-ChildItem -LiteralPath $Root -Filter 'SALOON-DREEM-Portable-*.exe' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -ne $Exe) {
+              $Target = $Exe.FullName
+              $WorkingDirectory = $Exe.DirectoryName
+          } else {
+              $Target = Join-Path $Root 'RUN-SALOON-DREEM.bat'
+              $WorkingDirectory = $Root
+          }
+          if (-not (Test-Path -LiteralPath $Target)) { throw "لم يتم العثور على ملف تشغيل SALOON DREEM: $Target" }
+          $Desktop = [Environment]::GetFolderPath('Desktop')
+          $ShortcutPath = Join-Path $Desktop 'SALOON DREEM.lnk'
+          $Shell = New-Object -ComObject WScript.Shell
+          $Shortcut = $Shell.CreateShortcut($ShortcutPath)
+          $Shortcut.TargetPath = $Target
+          $Shortcut.WorkingDirectory = $WorkingDirectory
+          $Shortcut.Description = 'تشغيل نظام إدارة صالون الحلاقة SALOON DREEM'
+          $Shortcut.Save()
+          Write-Host "تم إنشاء الاختصار: $ShortcutPath" -ForegroundColor Green
+          PS1
+
+          # Apply two data-integrity fixes to the recovered backend.
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("backend/app/main.py")
+          source = p.read_text(encoding="utf-8")
+          assert 'APP_VERSION = "1.2.0"' in source
+          source = source.replace('APP_VERSION = "1.2.0"', 'APP_VERSION = "1.2.1"', 1)
+
+          old_csv = '''        writer.writerow([row["id"], row["customer_name"], row["customer_phone"], row["service_name"], row["barber_name"] or "—", row["start_at"], row["end_at"], status_names.get(row["status"], row["status"]), row["price"], "مدفوع" if row["payment_status"] == "paid" else "غير مدفوع", row["notes"]])'''
+          new_csv = '''        writer.writerow([safe_csv_cell(value) for value in (row["id"], row["customer_name"], row["customer_phone"], row["service_name"], row["barber_name"] or "—", row["start_at"], row["end_at"], status_names.get(row["status"], row["status"]), row["price"], "مدفوع" if row["payment_status"] == "paid" else "غير مدفوع", row["notes"])])'''
+          assert source.count(old_csv) == 1, "CSV export row does not match the verified source"
+          source = source.replace(old_csv, new_csv, 1)
+
+          # Serialize slot checks so concurrent requests do not both reserve one slot.
+          appointment_check = '''    with db() as con:
+        service = con.execute("SELECT * FROM services WHERE id=? AND active=1", (payload.service_id,)).fetchone()'''
+          assert source.count(appointment_check) == 2, "Expected exactly two appointment creation routes"
+          source = source.replace(appointment_check, '''    with db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        service = con.execute("SELECT * FROM services WHERE id=? AND active=1", (payload.service_id,)).fetchone()''')
+
+          pay_marker = '@app.post("/api/appointments/{appointment_id}/pay")'
+          pay_pos = source.index(pay_marker)
+          lock_pos = source.index('    with db() as con:\n', pay_pos)
+          source = source[:lock_pos] + source[lock_pos:].replace(
+              '    with db() as con:\n',
+              '    with db() as con:\n        con.execute("BEGIN IMMEDIATE")\n',
+              1
+          )
+          p.write_text(source, encoding="utf-8")
+          PY
+
+          # Keep the release candidate branch readable; main remains unchanged.
+          git rm -r --ignore-unmatch .source-package restore-package-1.2.0 restore-package-1.2.0-verified
+          git rm --ignore-unmatch scripts/restore-source-package.ps1 .github/workflows/restore-source-package.yml
+          git add -A
+
+      - name: Validate the assembled source before publishing it
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pytest -q
+          python -m compileall -q backend server.py
+          npm install --no-audit --no-fund
+          npm run build:web
+          npm run check:js
+          test -s frontend/icons/icon-192.png
+          test -s frontend/icons/icon-512.png
+          git add package-lock.json
+          git diff --cached --check
+
+      - name: Commit assembled source on the release branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "recovery: restore validated SALOON DREEM 1.2.1 source tree"
+          git fetch origin "$GITHUB_REF_NAME"
+          git rebase "origin/$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
