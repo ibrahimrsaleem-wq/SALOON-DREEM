@@ -15,6 +15,7 @@ $Shell = New-Object -ComObject WScript.Shell
 $Shortcut = $Shell.CreateShortcut($ShortcutPath)
 $Shortcut.TargetPath = $Target
 $Shortcut.WorkingDirectory = $WorkingDirectory
+$Shortcut.IconLocation = "$Target,0"
 $Shortcut.Description = 'تشغيل نظام إدارة صالون الحلاقة SALOON DREEM'
 $Shortcut.Save()
 Write-Host "تم إنشاء الاختصار: $ShortcutPath" -ForegroundColor Green
