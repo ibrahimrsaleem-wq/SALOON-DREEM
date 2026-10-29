@@ -42,3 +42,5 @@ Set-ExecutionPolicy -Scope Process Bypass
 The automated Windows EXE and Android APK builds run in GitHub Actions. Use the `release-candidate-builds.yml` workflow run on the `release/1.2.1` branch; only download artifacts when both native jobs have succeeded.
 
 Android build configuration now creates the Gradle project before any Gradle cache is attempted.
+
+The latest release-candidate run includes fixes for Windows asset bundling and Android build initialization.
