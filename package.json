@@ -1,6 +1,6 @@
 {
   "name": "saloon-dreem",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
   "description": "Arabic-first barber salon appointments and business management app",
   "license": "UNLICENSED",
@@ -34,9 +34,10 @@
       { "from": "dist/server/saloon-dreem-server.exe", "to": "server/saloon-dreem-server.exe" }
     ],
     "win": {
+      "icon": "frontend/icons/saloondreem.ico",
       "target": [{ "target": "portable", "arch": ["x64"] }],
-      "artifactName": "SALOON-DREEM-Portable-1.2.1.exe"
+      "artifactName": "SALOON-DREEM-Portable-1.2.2.exe"
     },
-    "portable": { "artifactName": "SALOON-DREEM-Portable-1.2.1.exe" }
+    "portable": { "artifactName": "SALOON-DREEM-Portable-1.2.2.exe" }
   }
 }

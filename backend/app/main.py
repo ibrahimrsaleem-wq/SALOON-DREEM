@@ -60,7 +60,7 @@ except ValueError as exc:
     raise RuntimeError("TOKEN_HOURS يجب أن يكون رقمًا صحيحًا من 1 إلى 168.") from exc
 if not 1 <= TOKEN_HOURS <= 168:
     raise RuntimeError("TOKEN_HOURS يجب أن يكون بين 1 و168 ساعة.")
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 
 # Small process-local guard for local/single-instance installations. Production deployments
 # with multiple workers should also enforce rate limits at their reverse proxy/API gateway.

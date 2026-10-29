@@ -15,7 +15,7 @@ def test_health_setup_login_and_password_rotation(client):
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
-    assert health.json()["version"] == "1.2.1"
+    assert health.json()["version"] == "1.2.2"
     assert client.get("/api/setup/status").json()["setup_required"] is True
 
     headers, old_token = create_admin(client)
