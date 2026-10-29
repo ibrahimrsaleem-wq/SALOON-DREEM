@@ -48,7 +48,7 @@ npm run check:js
 
 تتضمن GitHub Actions اختبارات API، وفحوص Python وJavaScript، واختبار صحة خادم Windows المجمّع، وبناء Windows Portable EXE وAndroid Debug APK. تحقق من نجاح كل المهام قبل اعتماد أي أثر بناء.
 
-- فرع المصدر: https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/tree/release/1.2.2
+- فرع المصدر: https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/tree/main
 - سجل البناء الحالي: https://github.com/ibrahimrsaleem-wq/SALOON-DREEM/actions
 
 ## الحدود المعروفة قبل الاستخدام التجاري
