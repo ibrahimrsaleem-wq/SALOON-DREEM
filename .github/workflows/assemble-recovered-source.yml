@@ -160,7 +160,7 @@ jobs:
                 "target": [{ "target": "portable", "arch": ["x64"] }],
                 "artifactName": "SALOON-DREEM-Portable-1.2.1.exe"
               },
-              "portable": { "artifactName": "SALOON-DREEM-Portable-\${version}.\${ext}" }
+              "portable": { "artifactName": "SALOON-DREEM-Portable-1.2.1.exe" }
             }
           }
           JSON
