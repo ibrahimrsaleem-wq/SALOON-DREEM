@@ -1,0 +1,206 @@
+name: SALOON DREEM — release candidate builds
+
+on:
+  push:
+    branches: [release/1.2.1]
+    paths:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'BUILD-STATUS.md'
+      - '.env.example'
+      - 'backend/**'
+      - 'frontend/**'
+      - 'desktop/**'
+      - 'tools/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - 'server.py'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'capacitor.config.json'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: saloon-dreem-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: API tests and source validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+          cache: npm
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - name: Run API and business-rule tests
+        run: python -m pytest -q
+      - name: Compile backend
+        run: python -m compileall -q backend server.py
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Validate web assets and JavaScript
+        run: npm run build:web && npm run check:js
+      - name: Verify required app assets
+        run: |
+          test -s frontend/index.html
+          test -s frontend/app.js
+          test -s frontend/styles.css
+          test -s frontend/manifest.webmanifest
+          test -s backend/app/main.py
+          test -s desktop/main.cjs
+      - name: Package validated source for native builders
+        run: |
+          tar -czf "$RUNNER_TEMP/SALOON-DREEM-source.tar.gz" \
+            --exclude='.git' --exclude='node_modules' --exclude='.venv' \
+            --exclude='.pytest_cache' --exclude='__pycache__' \
+            --exclude='data/*.db' --exclude='data/.token-secret' .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SALOON-DREEM-Source-1.2.1
+          path: ${{ runner.temp }}/SALOON-DREEM-source.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-portable:
+    name: Windows portable executable
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: SALOON-DREEM-Source-1.2.1
+          path: source-package
+      - name: Extract source
+        shell: pwsh
+        run: tar -xzf source-package/SALOON-DREEM-source.tar.gz -C $env:GITHUB_WORKSPACE
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+          cache: npm
+      - name: Install Python and PyInstaller
+        run: python -m pip install --upgrade pip; python -m pip install -r requirements-build.txt
+      - name: Package FastAPI backend as a standalone Windows server
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile `
+            --name saloon-dreem-server `
+            --distpath dist/server `
+            --workpath build/pyinstaller `
+            --specpath build/spec `
+            --add-data "frontend;frontend" `
+            --collect-all fastapi `
+            --collect-all starlette `
+            --collect-all uvicorn `
+            --collect-all pydantic `
+            --collect-all dotenv `
+            --collect-all h11 `
+            --hidden-import uvicorn.logging `
+            --hidden-import uvicorn.loops.auto `
+            --hidden-import uvicorn.protocols.http.auto `
+            --hidden-import uvicorn.lifespan.on `
+            server.py
+      - name: Verify the packaged API executable starts
+        shell: pwsh
+        run: |
+          $env:HOST = "127.0.0.1"
+          $env:PORT = "18765"
+          $env:APP_TIMEZONE = "Asia/Gaza"
+          $env:DATA_DIR = Join-Path $env:RUNNER_TEMP "saloon-dreem-smoke"
+          $env:DATABASE_PATH = Join-Path $env:DATA_DIR "smoke.db"
+          $env:TOKEN_SECRET = "test-only-build-smoke-secret-0123456789"
+          New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
+          $process = Start-Process -FilePath "dist/server/saloon-dreem-server.exe" -PassThru -WindowStyle Hidden
+          $ready = $false
+          try {
+            for ($i = 0; $i -lt 35; $i++) {
+              Start-Sleep -Milliseconds 500
+              try {
+                $result = Invoke-RestMethod -Uri "http://127.0.0.1:18765/api/health" -TimeoutSec 2
+                if ($result.status -eq "ok") { $ready = $true; break }
+              } catch { }
+              if ($process.HasExited) { throw "Packaged API exited with code $($process.ExitCode)." }
+            }
+            if (-not $ready) { throw "Packaged API did not become healthy. Check PyInstaller hidden imports and bundled resources." }
+            Write-Host ("Packaged API healthy: version " + $result.version)
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+      - name: Install Electron dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build portable EXE
+        run: npm run dist:win
+      - name: Upload Windows portable EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: SALOON-DREEM-Windows-Portable-1.2.1
+          path: dist-electron/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  android-apk:
+    name: Android debug APK
+    needs: validate
+    runs-on: ubuntu-latest
+    env:
+      MOBILE_API_BASE_URL: ${{ vars.MOBILE_API_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: SALOON-DREEM-Source-1.2.1
+          path: source-package
+      - name: Extract source
+        run: tar -xzf source-package/SALOON-DREEM-source.tar.gz -C "$GITHUB_WORKSPACE"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Configure the optional HTTPS API endpoint
+        run: node tools/configure-mobile.mjs
+      - name: Generate Android project and sync web assets
+        run: npx cap add android && npx cap sync android
+      - name: Build installable Android APK
+        run: cd android && ./gradlew --no-daemon assembleDebug
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SALOON-DREEM-Android-APK-1.2.1
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
