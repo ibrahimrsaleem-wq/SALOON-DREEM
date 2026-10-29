@@ -2,7 +2,7 @@ name: Validate CI workflow YAML syntax
 
 on:
   push:
-    branches: [release/1.2.1]
+    branches: [release/1.2.2-icon]
     paths:
       - '.github/workflows/validate-workflow-syntax.yml'
       - '.github/workflows/assemble-recovered-source.yml'
