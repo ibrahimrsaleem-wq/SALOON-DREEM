@@ -1,0 +1,56 @@
+name: Source archive audit
+
+on:
+  push:
+    branches:
+      - audit/source-restore-2026-10-29
+      - release/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  restore-and-inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Restore source ZIP from verified segments
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p restored
+          : > restored/archive.b64
+          for index in $(seq 0 18); do
+            part="$(printf '%03d' "$index")"
+            mapfile -t replacements < <(find .source-package/repair -maxdepth 1 -type f -name "part-${part}-*.b64" -print 2>/dev/null | sort -V || true)
+            if (( ${#replacements[@]} > 0 )); then
+              for piece in "${replacements[@]}"; do cat "$piece" >> restored/archive.b64; done
+            else
+              test -f ".source-package/part-${part}.b64"
+              cat ".source-package/part-${part}.b64" >> restored/archive.b64
+            fi
+          done
+          base64 --decode restored/archive.b64 > restored/SALOON-DREEM-1.1.0-source.zip
+          printf '%s  %s\n' 'bdbeda15e54539a0fa56e3686a7c91c6f507e95fb5d9929afe709d5540b4a308' 'restored/SALOON-DREEM-1.1.0-source.zip' | sha256sum --check
+          unzip -t restored/SALOON-DREEM-1.1.0-source.zip
+          unzip -q restored/SALOON-DREEM-1.1.0-source.zip -d restored/source
+          find restored/source -type f -printf '%P\n' | sort > restored/source-inventory.txt
+          echo "Source file count: $(wc -l < restored/source-inventory.txt)"
+          echo "Top-level source entries:"
+          find restored/source -mindepth 1 -maxdepth 2 -printf '%y %P\n' | sort | head -250
+          echo "Potential build and test manifests:"
+          find restored/source -type f \( -name 'package.json' -o -name '*lock*' -o -name 'requirements*.txt' -o -name 'pyproject.toml' -o -name 'pytest.ini' -o -name 'capacitor.config.*' -o -name 'electron-builder.*' -o -name 'Dockerfile' -o -name 'build.gradle*' -o -name 'gradlew' \) -printf '%P\n' | sort
+
+      - name: Upload restored source for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: saloon-dreem-restored-source
+          path: |
+            restored/SALOON-DREEM-1.1.0-source.zip
+            restored/source/**
+            restored/source-inventory.txt
+          if-no-files-found: error
+          retention-days: 14
