@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - audit/package-validation-1.2.0
+    paths:
+      - '.source-package/**'
+      - 'restore-package-1.2.0/**'
+      - 'restore-package-1.2.0-verified/**'
+      - '.github/workflows/source-package-recovery.yml'
   workflow_dispatch:
 
 concurrency:
@@ -11,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   salvage:
@@ -67,14 +72,14 @@ jobs:
                       payload = base64.b64decode(padded, validate=True)
                       target = out / f"{variant_label}.damaged.zip"
                       target.write_bytes(payload)
-                      report.append(f"{variant_label}: decoded bytes={len(payload)} chars={len(encoded)} original_remainder={len(encoded)%4}")
+                      report.append(f"{variant_label}: decoded bytes={len(payload)} chars={len(encoded)}")
                   except Exception as exc:
                       report.append(f"{variant_label}: decode failed: {exc}")
           (out / "decode-report.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
           print("\n".join(report))
           PY
 
-      - name: Attempt ZIP salvage and test every recovered entry
+      - name: Recover ZIP directory and extract CRC-valid entries only
         shell: bash
         run: |
           set -u
@@ -86,29 +91,73 @@ jobs:
             echo "=== Attempting ZIP recovery: $label ==="
             (timeout 30s bash -c 'yes | zip -FF "$1" --out "$2"' _ "$candidate" "$repaired" >"$log" 2>&1 || true)
             cat "$log" || true
-            if [ -f "$repaired" ] && unzip -t "$repaired" >"diagnostics-recovery/$label-zip-test.txt" 2>&1; then
-              echo "ZIP central-directory and CRC validation passed: $label"
-              mkdir -p "diagnostics-recovery/$label-source"
-              unzip -q "$repaired" -d "diagnostics-recovery/$label-source"
-              find "diagnostics-recovery/$label-source" -type f -printf '%P\n' | sort > "diagnostics-recovery/$label-inventory.txt"
-              find "diagnostics-recovery/$label-source" -type f \( -name 'package.json' -o -name 'requirements*.txt' -o -name 'pyproject.toml' -o -name 'pytest.ini' -o -name 'capacitor.config.*' -o -name 'electron-builder.*' -o -name 'build.gradle*' -o -name 'gradlew' \) -printf '%P\n' | sort > "diagnostics-recovery/$label-build-manifests.txt"
-              sha256sum "$repaired" > "diagnostics-recovery/$label-recovered-sha256.txt"
-              echo "Files recovered: $(wc -l < "diagnostics-recovery/$label-inventory.txt")"
-            else
-              rm -f "$repaired"
-              echo "No fully CRC-valid ZIP recovery for $label"
-            fi
           done
-          test -f diagnostics-recovery/decode-report.txt
 
-      - name: Upload recovery report and validated source only
-        uses: actions/upload-artifact@v4
-        with:
-          name: saloon-dreem-source-salvage
-          path: |
-            diagnostics-recovery/*.txt
-            diagnostics-recovery/*.log
-            diagnostics-recovery/*-source/**
-            diagnostics-recovery/*.recovered-sha256.txt
-          if-no-files-found: error
-          retention-days: 14
+          python - <<'PY'
+          from pathlib import Path, PurePosixPath
+          import hashlib, json, zlib, zipfile
+
+          output = Path("RecoveredSource")
+          output.mkdir(exist_ok=True)
+          reports = []
+          for archive in sorted(Path("diagnostics-recovery").glob("*.recovered.zip")):
+              label = archive.name.removesuffix(".recovered.zip")
+              target_root = output / label
+              try:
+                  with zipfile.ZipFile(archive) as zf:
+                      members = zf.infolist()
+                      ok, bad = 0, []
+                      for item in members:
+                          if item.is_dir():
+                              continue
+                          safe = PurePosixPath(item.filename)
+                          if safe.is_absolute() or ".." in safe.parts:
+                              bad.append({"file": item.filename, "reason": "unsafe path skipped"})
+                              continue
+                          try:
+                              data = zf.read(item)
+                              if (zlib.crc32(data) & 0xffffffff) != item.CRC:
+                                  raise ValueError("CRC does not match central-directory value")
+                              destination = target_root.joinpath(*safe.parts)
+                              destination.parent.mkdir(parents=True, exist_ok=True)
+                              destination.write_bytes(data)
+                              ok += 1
+                          except Exception as exc:
+                              bad.append({"file": item.filename, "reason": str(exc)})
+                      reports.append({
+                          "archive": label,
+                          "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                          "entries_seen": len(members),
+                          "files_recovered_and_crc_verified": ok,
+                          "rejected_or_corrupt_files": bad
+                      })
+              except Exception as exc:
+                  reports.append({"archive": label, "fatal_error": str(exc)})
+          (output / "RECOVERY-REPORT.json").write_text(json.dumps(reports, indent=2), encoding="utf-8")
+          md = ["# SALOON-DREEM source salvage report", "",
+                "Only files that could be read and matched their ZIP CRC were preserved. This is a partial forensic recovery, not a complete release package.", ""]
+          for report in reports:
+              md += [f"## {report.get('archive', 'archive')}",
+                     f"- CRC-verified files: {report.get('files_recovered_and_crc_verified', 0)}",
+                     f"- Entries seen: {report.get('entries_seen', 0)}",
+                     f"- SHA-256 of recovered ZIP: {report.get('archive_sha256', 'unavailable')}",
+                     f"- Rejected/corrupt entries: {len(report.get('rejected_or_corrupt_files', []))}", ""]
+              for bad in report.get("rejected_or_corrupt_files", []):
+                  md.append(f"  - `{bad['file']}`: {bad['reason']}")
+          (output / "README-RECOVERY.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+          print((output / "README-RECOVERY.md").read_text())
+          PY
+
+      - name: Commit only CRC-verified source files to this audit branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add RecoveredSource
+          if git diff --cached --quiet; then
+            echo "No CRC-verified files were recoverable."
+            exit 0
+          fi
+          git commit -m "recovery: preserve individually CRC-verified source files [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
