@@ -258,7 +258,10 @@ jobs:
         run: |
           set -euo pipefail
           tar -xzf source-package/SALOON-DREEM-source.tar.gz -C "$GITHUB_WORKSPACE"
-          rm -rf source-bundles
+          # Do not commit workflow files: the repository token does not carry the workflows permission.
+          # Preserve the already reviewed build/signing workflows from the branch.
+          git checkout -- .github/workflows
+          rm -rf source-bundles source-package
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
