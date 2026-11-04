@@ -4,7 +4,7 @@ on:
   push:
     branches: [release/v1.3.0-production]
     paths:
-      - 'source-bundles/part-05.b64'
+      - 'source-bundles/part-05b.b64'
   workflow_dispatch:
 
 permissions:
