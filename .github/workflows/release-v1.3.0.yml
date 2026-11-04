@@ -303,7 +303,7 @@ jobs:
           if updated.get("object", {}).get("sha") != commit["sha"]:
               raise RuntimeError("GitHub did not move the release branch to the source commit.")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"commit_sha={commit['sha']}\\n")
+          output.write("commit_sha=" + commit["sha"] + "\n")
           print(f"Uploaded {len(source_files)} source/archive files.")
           print(f"Release branch updated to {commit['sha']}.")
           PY
