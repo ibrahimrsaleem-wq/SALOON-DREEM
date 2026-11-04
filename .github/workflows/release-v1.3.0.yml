@@ -232,7 +232,7 @@ jobs:
           cat > dist/RELEASE-NOTES-AR.md <<'NOTES'
           # SALOON DREEM 1.3.0
           - Windows x64 Portable EXE بعد اختبار صحة الخادم المجمع.
-          - Windows ZIP مع الأيقونة واختصار سطح المكتب.
+          - Windows EXE محمول مع سكربت إنشاء اختصار وأيقونة التطبيق.
           - Android Debug APK بعد التحقق من التوقيع ومعرّف الحزمة.
           - أرشيف المصدر الذي اجتاز الاختبارات، وملف SHA-256.
           - صلاحيات الموظفين، دوام الحلاقين، توافر الحجز، فصل التحصيل عن الخدمة، الاسترداد، ترحيل قاعدة 1.2.2 والنسخ الاحتياطي.
@@ -253,10 +253,10 @@ jobs:
           ASSETS=(dist/SALOON-DREEM-Portable-1.3.0.exe
             dist/SALOON-DREEM-Android-1.3.0-debug.apk dist/SALOON-DREEM-Source-1.3.0.tar.gz
             dist/SALOON-DREEM-Icon-1.3.0.ico dist/SALOON-DREEM-1.3.0-SHA256SUMS.txt)
-          if ! gh release view v1.3.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create v1.3.0 --repo "$GITHUB_REPOSITORY" --draft --target '${{ needs.persist-source.outputs.commit_sha }}' \
-              --title 'SALOON DREEM 1.3.0' --notes-file dist/RELEASE-NOTES-AR.md
-          fi
+          # Remove an incomplete draft from a previous interrupted upload, if present.
+          gh release delete v1.3.0 --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag >/dev/null 2>&1 || true
+          gh release create v1.3.0 --repo "$GITHUB_REPOSITORY" --draft --target '${{ needs.persist-source.outputs.commit_sha }}' \
+            --title 'SALOON DREEM 1.3.0' --notes-file dist/RELEASE-NOTES-AR.md
           for asset in "${ASSETS[@]}"; do
             uploaded=false
             for attempt in 1 2 3 4 5; do
