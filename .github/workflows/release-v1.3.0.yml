@@ -3,6 +3,8 @@ name: SALOON DREEM 1.3.0 — validate, build and publish
 on:
   push:
     branches: [release/v1.3.0-production]
+    paths:
+      - '.github/workflows/release-v1.3.0.yml'
   workflow_dispatch:
 
 permissions:
@@ -158,19 +160,153 @@ jobs:
           retention-days: 30
 
   persist-source:
-    name: Record the validated source release commit
+    name: Upload the complete tested source tree to the repository
     if: github.event_name == 'push'
     needs: [validate, windows-portable, android-apk]
     runs-on: ubuntu-latest
     outputs:
-      commit_sha: ${{ steps.record.outputs.commit_sha }}
+      commit_sha: ${{ steps.persist.outputs.commit_sha }}
     steps:
-      - name: Record branch commit for the release
-        id: record
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: SALOON-DREEM-Source-1.3.0
+          path: source-package
+      - name: Commit full source tree with GitHub API
+        id: persist
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "commit_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          mkdir -p source-tree
+          tar -xzf source-package/SALOON-DREEM-source.tar.gz -C source-tree
+          python - <<'PY'
+          import base64
+          import concurrent.futures
+          import json
+          import os
+          import pathlib
+          import time
+          import urllib.error
+          import urllib.request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GITHUB_TOKEN"]
+          ref_name = os.environ["GITHUB_REF_NAME"]
+          base = f"https://api.github.com/repos/{repo}"
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "SALOON-DREEM-release-publisher",
+          }
+
+          def api(method, endpoint, payload=None):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              request = urllib.request.Request(
+                  base + endpoint, data=data, headers=headers, method=method
+              )
+              for attempt in range(5):
+                  try:
+                      with urllib.request.urlopen(request, timeout=60) as response:
+                          return json.loads(response.read().decode("utf-8"))
+                  except urllib.error.HTTPError as exc:
+                      detail = exc.read().decode("utf-8", errors="replace")
+                      if exc.code >= 500 and attempt < 4:
+                          time.sleep(2 ** attempt)
+                          continue
+                      raise RuntimeError(
+                          f"GitHub API {method} {endpoint} failed ({exc.code}): {detail}"
+                      ) from exc
+
+          ref = api("GET", f"/git/ref/heads/{ref_name}")
+          parent_sha = ref["object"]["sha"]
+          if parent_sha != os.environ["GITHUB_SHA"]:
+              raise RuntimeError(
+                  f"Branch moved during release: expected {os.environ['GITHUB_SHA']}, got {parent_sha}"
+              )
+          parent = api("GET", f"/git/commits/{parent_sha}")
+          base_tree_sha = parent["tree"]["sha"]
+
+          root = pathlib.Path("source-tree")
+          source_files = []
+          for path in sorted(root.rglob("*")):
+              if not path.is_file():
+                  continue
+              rel = path.relative_to(root).as_posix()
+              parts = pathlib.PurePosixPath(rel).parts
+              if rel.startswith(".github/workflows/"):
+                  continue  # Keep existing workflows; this token intentionally lacks the workflows permission.
+              if any(part in {"__pycache__", ".pytest_cache", "node_modules", ".venv"} for part in parts):
+                  continue
+              if rel == ".env" or (path.name.startswith(".env") and path.name != ".env.example"):
+                  continue
+              if path.suffix.lower() in {".db", ".sqlite", ".sqlite3", ".pyc"}:
+                  continue
+              source_files.append((rel, path.read_bytes()))
+
+          if not source_files:
+              raise RuntimeError("The validated source archive was empty.")
+
+          archive_path = pathlib.Path("source-package/SALOON-DREEM-source.tar.gz")
+          source_files.append((
+              "release-source/SALOON-DREEM-source.tar.gz",
+              archive_path.read_bytes(),
+          ))
+          source_readme = (
+              "# SALOON DREEM 1.3.0 — complete source archive\n\n"
+              "This repository contains the complete application source tree at its root. "
+              "The matching tested source snapshot is also stored at "
+              "`release-source/SALOON-DREEM-source.tar.gz`.\n\n"
+              "Extract on Windows with 7-Zip, or in PowerShell:\n"
+              "```powershell\n"
+              "tar -xzf .\\release-source\\SALOON-DREEM-source.tar.gz\n"
+              "```\n\n"
+              "The archive omits secrets, local databases, virtual environments, and build caches. "
+              "Start from `.env.example` and follow `docs/DEPLOYMENT.md`.\n"
+          ).encode("utf-8")
+          source_files.append(("release-source/README.md", source_readme))
+
+          def create_blob(item):
+              rel, raw = item
+              encoded = base64.b64encode(raw).decode("ascii")
+              result = api("POST", "/git/blobs", {
+                  "content": encoded,
+                  "encoding": "base64",
+              })
+              return {
+                  "path": rel,
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": result["sha"],
+              }
+
+          with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+              entries = list(pool.map(create_blob, source_files))
+
+          tree = api("POST", "/git/trees", {
+              "base_tree": base_tree_sha,
+              "tree": entries,
+          })
+          commit = api("POST", "/git/commits", {
+              "message": "release: upload complete tested SALOON DREEM 1.3.0 source",
+              "tree": tree["sha"],
+              "parents": [parent_sha],
+          })
+          updated = api("PATCH", f"/git/refs/heads/{ref_name}", {
+              "sha": commit["sha"],
+              "force": False,
+          })
+          if updated.get("object", {}).get("sha") != commit["sha"]:
+              raise RuntimeError("GitHub did not move the release branch to the source commit.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"commit_sha={commit['sha']}\\n")
+          print(f"Uploaded {len(source_files)} source/archive files.")
+          print(f"Release branch updated to {commit['sha']}.")
+          PY
 
   publish-release:
     name: Publish verified GitHub Release
