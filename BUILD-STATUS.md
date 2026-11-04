@@ -1,7 +1,9 @@
-# Build status — SALOON DREEM 1.2.2
+# Build status — SALOON DREEM 1.3.0
 
-This is a source-recovery candidate. The prior encoded ZIP files were incomplete or corrupt, so the source tree was reconstructed from individually CRC-verified files. This does not imply every original file has been recovered.
+This branch contains the 1.3.0 release candidate. Local validation completed successfully: 12 API/business-rule tests passed; Python modules compile; JavaScript syntax checks pass; and required web assets validate.
 
-Release acceptance requires API/business-rule tests, Python compile checks, JavaScript asset checks, a Windows API executable health test, an Electron portable EXE build, and an Android APK build. The current GitHub Actions result and artifacts are authoritative. No hosted production API, signed app-store package, publisher certificate or external payment/OTP integration is included.
+The GitHub release workflow on `release/v1.3.0-production` must still build and verify the Windows x64 portable EXE and Android Debug APK on their native runners. Release assets are published only after both builds and source validation pass. Refunding a pending/confirmed appointment also cancels it to release the barber's slot; a refund after a completed service remains a ledger adjustment without rewriting service history.
 
-Windows packaging generates a multi-resolution ICO from the official SALOON DREEM logo PNG and embeds it into the EXE metadata and the desktop window/taskbar. The Windows build checks that the icon was generated before packaging.
+The Windows bundle includes the pinned IANA `tzdata` package so the configured salon timezone is available on Windows as well as Linux. The 1.3.0 source migrates the 1.2.2 SQLite schema in place and tests preservation of existing users, appointments, customers, and ledger entries. Always back up a real database before upgrading and test restoration separately.
+
+Known product boundaries: no external card/bank payment processor, SMS/OTP, WhatsApp or calendar integration; customer lookup is booking-ID-plus-phone rather than a fully authenticated customer account; Android needs a reachable HTTPS API; Windows requires a trusted Authenticode certificate to obtain a publisher signature; Android store release needs a production signing key.

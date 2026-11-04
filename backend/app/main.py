@@ -14,12 +14,13 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager, contextmanager
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Generator, Optional
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,7 +31,11 @@ load_dotenv(ROOT / ".env")
 DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data"))).expanduser()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = Path(os.getenv("DATABASE_PATH", str(DATA_DIR / "saloon_dreem.db"))).expanduser()
-TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Gaza")
+TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Gaza").strip()
+try:
+    TIMEZONE_INFO = ZoneInfo(TIMEZONE)
+except ZoneInfoNotFoundError as exc:
+    raise RuntimeError(f"المنطقة الزمنية {TIMEZONE!r} غير معروفة؛ استخدم اسماً من قاعدة IANA وتأكد من تثبيت tzdata.") from exc
 TOKEN_SECRET = os.getenv("TOKEN_SECRET", "").strip()
 if not TOKEN_SECRET:
     # Stable per-installation secret; explicitly setting TOKEN_SECRET remains preferred in production.
@@ -60,7 +65,7 @@ except ValueError as exc:
     raise RuntimeError("TOKEN_HOURS يجب أن يكون رقمًا صحيحًا من 1 إلى 168.") from exc
 if not 1 <= TOKEN_HOURS <= 168:
     raise RuntimeError("TOKEN_HOURS يجب أن يكون بين 1 و168 ساعة.")
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.3.0"
 
 # Small process-local guard for local/single-instance installations. Production deployments
 # with multiple workers should also enforce rate limits at their reverse proxy/API gateway.
@@ -162,10 +167,7 @@ def db() -> Generator[sqlite3.Connection, None, None]:
 
 
 def now_local() -> datetime:
-    try:
-        return datetime.now(ZoneInfo(TIMEZONE))
-    except Exception:
-        return datetime.now().astimezone()
+    return datetime.now(TIMEZONE_INFO)
 
 
 def now_iso() -> str:
@@ -180,7 +182,10 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 password_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'admin',
+                active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+                barber_id INTEGER
             );
             CREATE TABLE IF NOT EXISTS services (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -217,6 +222,7 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'confirmed' CHECK(status IN ('pending','confirmed','completed','cancelled')),
                 price REAL NOT NULL DEFAULT 0 CHECK(price >= 0),
                 payment_status TEXT NOT NULL DEFAULT 'unpaid' CHECK(payment_status IN ('unpaid','paid')),
+                refund_status TEXT NOT NULL DEFAULT 'none' CHECK(refund_status IN ('none','refunded')),
                 notes TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -229,6 +235,7 @@ def init_db() -> None:
                 transaction_date TEXT NOT NULL,
                 note TEXT NOT NULL DEFAULT '',
                 appointment_id INTEGER REFERENCES appointments(id),
+                payment_method TEXT NOT NULL DEFAULT 'cash',
                 created_at TEXT NOT NULL
             );
             CREATE UNIQUE INDEX IF NOT EXISTS uq_transaction_appointment_income
@@ -236,12 +243,48 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS ix_appointments_start ON appointments(start_at);
             CREATE INDEX IF NOT EXISTS ix_appointments_barber_start ON appointments(barber_id, start_at, end_at);
             CREATE INDEX IF NOT EXISTS ix_transactions_date ON transactions(transaction_date);
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_transaction_appointment_refund
+                ON transactions(appointment_id) WHERE appointment_id IS NOT NULL AND category='appointment_refund';
+            CREATE TABLE IF NOT EXISTS barber_shifts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                barber_id INTEGER NOT NULL REFERENCES barbers(id) ON DELETE CASCADE,
+                weekday INTEGER NOT NULL CHECK(weekday BETWEEN 0 AND 6),
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+                UNIQUE(barber_id,weekday,start_time,end_time),
+                CHECK(start_time < end_time)
+            );
+            CREATE TABLE IF NOT EXISTS barber_time_off (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                barber_id INTEGER NOT NULL REFERENCES barbers(id) ON DELETE CASCADE,
+                start_at TEXT NOT NULL,
+                end_at TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                CHECK(start_at < end_at)
+            );
+            CREATE INDEX IF NOT EXISTS ix_barber_time_off_period ON barber_time_off(barber_id,start_at,end_at);
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
             """
         )
+        user_columns = {row["name"] for row in con.execute("PRAGMA table_info(users)").fetchall()}
+        if "role" not in user_columns:
+            con.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
+        if "active" not in user_columns:
+            con.execute("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+        if "barber_id" not in user_columns:
+            con.execute("ALTER TABLE users ADD COLUMN barber_id INTEGER")
+        appointment_columns = {row["name"] for row in con.execute("PRAGMA table_info(appointments)").fetchall()}
+        if "refund_status" not in appointment_columns:
+            con.execute("ALTER TABLE appointments ADD COLUMN refund_status TEXT NOT NULL DEFAULT 'none' CHECK(refund_status IN ('none','refunded'))")
+        transaction_columns = {row["name"] for row in con.execute("PRAGMA table_info(transactions)").fetchall()}
+        if "payment_method" not in transaction_columns:
+            con.execute("ALTER TABLE transactions ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash'")
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_transaction_appointment_refund ON transactions(appointment_id) WHERE appointment_id IS NOT NULL AND category='appointment_refund'")
         service_count = con.execute("SELECT COUNT(*) FROM services").fetchone()[0]
         if service_count == 0:
             defaults = [
@@ -311,6 +354,8 @@ class CustomerInput(BaseModel):
 
 
 class AppointmentInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     customer_name: str = Field(min_length=2, max_length=100)
     customer_phone: str = Field(min_length=5, max_length=40)
     customer_email: str = Field(default="", max_length=160)
@@ -329,24 +374,72 @@ class AppointmentPatch(BaseModel):
 
 
 class TransactionInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     kind: str = Field(pattern=r"^(income|expense)$")
     category: str = Field(min_length=2, max_length=100)
     amount: float = Field(gt=0, le=100000000)
     transaction_date: str = Field(min_length=10, max_length=10)
     note: str = Field(default="", max_length=1000)
+    payment_method: str = Field(default="cash", pattern=r"^(cash|card|bank_transfer|wallet)$")
 
 
 class SettingsInput(BaseModel):
     settings: dict[str, str]
 
 
+class StaffInput(BaseModel):
+    username: str = Field(min_length=3, max_length=40, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=8, max_length=128)
+    role: str = Field(pattern=r"^(admin|manager|receptionist|cashier|barber)$")
+    barber_id: Optional[int] = Field(default=None, gt=0)
+
+
+class StaffPatch(BaseModel):
+    active: Optional[bool] = None
+    role: Optional[str] = Field(default=None, pattern=r"^(admin|manager|receptionist|cashier|barber)$")
+    barber_id: Optional[int] = Field(default=None, gt=0)
+    new_password: Optional[str] = Field(default=None, min_length=8, max_length=128)
+
+
+class PaymentInput(BaseModel):
+    payment_method: str = Field(default="cash", pattern=r"^(cash|card|bank_transfer|wallet)$")
+
+
+class RefundInput(BaseModel):
+    payment_method: str = Field(default="cash", pattern=r"^(cash|card|bank_transfer|wallet)$")
+    note: str = Field(default="", max_length=500)
+
+
+class BarberShiftInput(BaseModel):
+    weekday: int = Field(ge=0, le=6)
+    start_time: str = Field(min_length=5, max_length=5)
+    end_time: str = Field(min_length=5, max_length=5)
+    active: bool = True
+
+
+class BarberTimeOffInput(BaseModel):
+    start_at: str = Field(min_length=16, max_length=30)
+    end_at: str = Field(min_length=16, max_length=30)
+    reason: str = Field(default="", max_length=300)
+
+
 class PublicAppointmentInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     customer_name: str = Field(min_length=2, max_length=100)
     customer_phone: str = Field(min_length=5, max_length=40)
     service_id: int = Field(gt=0)
     barber_id: Optional[int] = Field(default=None, gt=0)
     start_at: str = Field(min_length=16, max_length=30)
     notes: str = Field(default="", max_length=500)
+
+
+class AppointmentLookupInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    appointment_id: int = Field(gt=0)
+    phone: str = Field(min_length=5, max_length=40)
 
 
 # ---- authentication -------------------------------------------------------
@@ -407,13 +500,22 @@ def current_user(authorization: Optional[str] = Header(default=None)) -> dict[st
         raise HTTPException(status_code=401, detail="يرجى تسجيل الدخول أولًا.")
     payload = decode_token(authorization.split(" ", 1)[1].strip())
     with db() as con:
-        user = con.execute("SELECT id, username, created_at, password_hash FROM users WHERE id=?", (payload["sub"],)).fetchone()
-    if not user:
-        raise HTTPException(status_code=401, detail="الحساب غير موجود.")
+        user = con.execute("SELECT id,username,created_at,password_hash,role,active,barber_id FROM users WHERE id=?", (payload["sub"],)).fetchone()
+    if not user or not user["active"]:
+        raise HTTPException(status_code=401, detail="الحساب غير موجود أو تم إيقافه.")
     current_password_version = hashlib.sha256(user["password_hash"].encode("utf-8")).hexdigest()
     if not hmac.compare_digest(str(payload.get("pwdv", "")), current_password_version):
         raise HTTPException(status_code=401, detail="تم تغيير كلمة المرور. سجّل الدخول من جديد.")
-    return {"id": user["id"], "username": user["username"], "created_at": user["created_at"]}
+    return {"id": user["id"], "username": user["username"], "created_at": user["created_at"], "role": user["role"], "barber_id": user["barber_id"]}
+
+
+def require_roles(*roles: str):
+    allowed = set(roles)
+    def dependency(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+        if user.get("role") not in allowed:
+            raise HTTPException(status_code=403, detail="ليست لديك صلاحية لتنفيذ هذا الإجراء.")
+        return user
+    return dependency
 
 
 def require_setup_complete() -> None:
@@ -428,14 +530,21 @@ def as_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
 
 
 def clean_money(value: float) -> float:
-    return round(float(value), 2)
+    """Round an API amount with decimal half-up semantics to two minor units."""
+    try:
+        amount = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail="قيمة المبلغ غير صالحة.") from exc
+    if not amount.is_finite():
+        raise HTTPException(status_code=422, detail="قيمة المبلغ غير صالحة.")
+    return float(amount)
 
 
 def parse_local_start(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(ZoneInfo(TIMEZONE)).replace(tzinfo=None)
+            parsed = parsed.astimezone(TIMEZONE_INFO).replace(tzinfo=None)
         return parsed.replace(second=0, microsecond=0)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail="صيغة التاريخ والوقت غير صحيحة.") from exc
@@ -453,6 +562,23 @@ def ensure_slot(con: sqlite3.Connection, barber_id: int, start_at: str, end_at: 
         raise HTTPException(status_code=409, detail="هذا الموعد يتعارض مع حجز آخر للحلاق المختار. اختر وقتًا أو حلاقًا آخر.")
 
 
+def validate_barber_availability(con: sqlite3.Connection, barber_id: int, start: datetime, end: datetime) -> None:
+    configured = con.execute("SELECT COUNT(*) FROM barber_shifts WHERE barber_id=?", (barber_id,)).fetchone()[0]
+    if configured:
+        shift = con.execute(
+            "SELECT 1 FROM barber_shifts WHERE barber_id=? AND weekday=? AND active=1 AND start_time<=? AND end_time>=? LIMIT 1",
+            (barber_id, start.weekday(), start.strftime("%H:%M"), end.strftime("%H:%M")),
+        ).fetchone()
+        if start.date() != end.date() or not shift:
+            raise HTTPException(status_code=409, detail="الحلاق خارج دوامه المحدد في هذا الوقت.")
+    unavailable = con.execute(
+        "SELECT id FROM barber_time_off WHERE barber_id=? AND start_at<? AND end_at>? LIMIT 1",
+        (barber_id, end.isoformat(timespec="minutes"), start.isoformat(timespec="minutes")),
+    ).fetchone()
+    if unavailable:
+        raise HTTPException(status_code=409, detail="الحلاق مسجل كإجازة أو غير متاح في هذا الوقت.")
+
+
 def choose_barber(con: sqlite3.Connection, barber_id: Optional[int], start: datetime, end: datetime, exclude_id: Optional[int] = None) -> int:
     start_s, end_s = start.isoformat(timespec="minutes"), end.isoformat(timespec="minutes")
     if barber_id is not None:
@@ -460,11 +586,13 @@ def choose_barber(con: sqlite3.Connection, barber_id: Optional[int], start: date
         if not barber:
             raise HTTPException(status_code=422, detail="الحلاق المحدد غير متاح أو غير موجود.")
         ensure_slot(con, barber_id, start_s, end_s, exclude_id)
+        validate_barber_availability(con, barber_id, start, end)
         return barber_id
     barbers = con.execute("SELECT id FROM barbers WHERE active=1 ORDER BY name COLLATE NOCASE").fetchall()
     for barber in barbers:
         try:
             ensure_slot(con, int(barber["id"]), start_s, end_s, exclude_id)
+            validate_barber_availability(con, int(barber["id"]), start, end)
             return int(barber["id"])
         except HTTPException as exc:
             if exc.status_code != 409:
@@ -475,7 +603,7 @@ def choose_barber(con: sqlite3.Connection, barber_id: Optional[int], start: date
 
 
 def appointment_select_sql() -> str:
-    return """SELECT a.id,a.customer_id,a.service_id,a.barber_id,a.start_at,a.end_at,a.status,a.price,a.payment_status,a.notes,a.created_at,a.updated_at,
+    return """SELECT a.id,a.customer_id,a.service_id,a.barber_id,a.start_at,a.end_at,a.status,a.price,a.payment_status,a.refund_status,a.notes,a.created_at,a.updated_at,
               c.name AS customer_name,c.phone AS customer_phone,s.name AS service_name,s.duration_minutes,
               b.name AS barber_name
               FROM appointments a JOIN customers c ON c.id=a.customer_id
@@ -520,7 +648,7 @@ def ensure_business_hours(con: sqlite3.Connection, start: datetime, end: datetim
 # ---- public and session endpoints ----------------------------------------
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "app": "SALOON DREEM", "version": APP_VERSION, "time": now_iso()}
+    return {"status": "ok", "app": "SALOON DREEM", "version": APP_VERSION, "timezone": TIMEZONE, "time": now_iso()}
 
 
 @app.get("/api/setup/status")
@@ -540,15 +668,15 @@ def create_first_admin(payload: SetupInput, request: Request) -> dict[str, Any]:
         if count:
             raise HTTPException(status_code=409, detail="تم إعداد التطبيق مسبقًا. سجّل الدخول بدلًا من إنشاء مدير جديد.")
         try:
-            con.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)", (payload.username, hash_password(payload.password), now_iso()))
+            con.execute("INSERT INTO users(username,password_hash,created_at,role,active) VALUES(?,?,?,'admin',1)", (payload.username, hash_password(payload.password), now_iso()))
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="اسم المستخدم مستخدم بالفعل.") from exc
-        user = con.execute("SELECT id,username,created_at,password_hash FROM users WHERE username=?", (payload.username,)).fetchone()
+        user = con.execute("SELECT id,username,created_at,password_hash,role,barber_id FROM users WHERE username=?", (payload.username,)).fetchone()
         con.execute("UPDATE settings SET value=? WHERE key='business_name'", (payload.business_name.strip(),))
     return {
         "access_token": issue_token(user),
         "token_type": "bearer",
-        "user": {"id": user["id"], "username": user["username"], "created_at": user["created_at"]},
+        "user": {"id": user["id"], "username": user["username"], "created_at": user["created_at"], "role": user["role"], "barber_id": user["barber_id"]},
     }
 
 
@@ -558,9 +686,9 @@ def login(payload: LoginInput, request: Request) -> dict[str, Any]:
     require_setup_complete()
     with db() as con:
         user = con.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE", (payload.username.strip(),)).fetchone()
-    if not user or not verify_password(payload.password, user["password_hash"]):
+    if not user or not user["active"] or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="اسم المستخدم أو كلمة المرور غير صحيحة.")
-    return {"access_token": issue_token(user), "token_type": "bearer", "user": {"id": user["id"], "username": user["username"], "created_at": user["created_at"]}}
+    return {"access_token": issue_token(user), "token_type": "bearer", "user": {"id": user["id"], "username": user["username"], "created_at": user["created_at"], "role": user["role"], "barber_id": user["barber_id"]}}
 
 
 @app.get("/api/auth/me")
@@ -576,6 +704,62 @@ def change_password(payload: PasswordInput, user: dict[str, Any] = Depends(curre
             raise HTTPException(status_code=400, detail="كلمة المرور الحالية غير صحيحة.")
         con.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(payload.new_password), user["id"]))
     return {"message": "تم تغيير كلمة المرور وإلغاء الجلسات السابقة. سجّل الدخول مجددًا."}
+
+
+@app.get("/api/users")
+def list_users(user: dict[str, Any] = Depends(require_roles("admin"))) -> list[dict[str, Any]]:
+    with db() as con:
+        rows = con.execute("""SELECT u.id,u.username,u.role,u.active,u.barber_id,u.created_at,b.name AS barber_name
+                            FROM users u LEFT JOIN barbers b ON b.id=u.barber_id ORDER BY u.active DESC,u.username""").fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.post("/api/users", status_code=201)
+def create_user(payload: StaffInput, user: dict[str, Any] = Depends(require_roles("admin"))) -> dict[str, Any]:
+    if payload.role == "barber":
+        if payload.barber_id is None:
+            raise HTTPException(status_code=422, detail="اربط حساب الحلاق بعضو من فريق الحلاقين.")
+        with db() as con:
+            barber = con.execute("SELECT id FROM barbers WHERE id=? AND active=1", (payload.barber_id,)).fetchone()
+            if not barber:
+                raise HTTPException(status_code=422, detail="الحلاق المحدد غير موجود أو غير نشط.")
+    elif payload.barber_id is not None:
+        raise HTTPException(status_code=422, detail="حساب الحلاق فقط يمكن ربطه بعضو في الفريق.")
+    with db() as con:
+        try:
+            cursor = con.execute("INSERT INTO users(username,password_hash,created_at,role,active,barber_id) VALUES(?,?,?,?,1,?)", (payload.username.strip(), hash_password(payload.password), now_iso(), payload.role, payload.barber_id))
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="اسم المستخدم مستخدم بالفعل.") from exc
+        row = con.execute("SELECT id,username,role,active,barber_id,created_at FROM users WHERE id=?", (cursor.lastrowid,)).fetchone()
+    return {"user": dict(row)}
+
+
+@app.patch("/api/users/{user_id}")
+def update_user(user_id: int, payload: StaffPatch, user: dict[str, Any] = Depends(require_roles("admin"))) -> dict[str, Any]:
+    with db() as con:
+        target = con.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="حساب الموظف غير موجود.")
+        new_active = int(payload.active) if payload.active is not None else int(target["active"])
+        new_role = payload.role or target["role"]
+        new_barber_id = payload.barber_id if payload.barber_id is not None else target["barber_id"]
+        if user_id == user["id"] and (new_active == 0 or new_role != "admin"):
+            raise HTTPException(status_code=409, detail="لا يمكنك إيقاف حسابك أو إزالة صلاحية المدير عن نفسك.")
+        if target["role"] == "admin" and (new_active == 0 or new_role != "admin"):
+            count = con.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND active=1").fetchone()[0]
+            if count <= 1:
+                raise HTTPException(status_code=409, detail="يجب إبقاء مدير نشط واحد على الأقل.")
+        if new_role == "barber":
+            if new_barber_id is None or not con.execute("SELECT id FROM barbers WHERE id=? AND active=1", (new_barber_id,)).fetchone():
+                raise HTTPException(status_code=422, detail="اربط حساب الحلاق بحلاق نشط.")
+        else:
+            new_barber_id = None
+        if payload.new_password:
+            con.execute("UPDATE users SET password_hash=?,role=?,active=?,barber_id=? WHERE id=?", (hash_password(payload.new_password), new_role, new_active, new_barber_id, user_id))
+        else:
+            con.execute("UPDATE users SET role=?,active=?,barber_id=? WHERE id=?", (new_role, new_active, new_barber_id, user_id))
+        row = con.execute("SELECT id,username,role,active,barber_id,created_at FROM users WHERE id=?", (user_id,)).fetchone()
+    return {"user": dict(row)}
 
 
 @app.get("/api/public/services")
@@ -595,7 +779,64 @@ def public_settings() -> dict[str, str]:
     with db() as con:
         stored = get_settings(con)
     public_keys = ("business_name", "phone", "address", "open_time", "close_time", "currency")
-    return {key: stored.get(key, "") for key in public_keys}
+    result = {key: stored.get(key, "") for key in public_keys}
+    result["timezone"] = TIMEZONE
+    return result
+
+
+@app.get("/api/public/availability")
+def public_availability(
+    request: Request,
+    date_value: str = Query(alias="date", min_length=10, max_length=10),
+    service_id: int = Query(gt=0),
+    barber_id: Optional[int] = Query(default=None, gt=0),
+) -> dict[str, Any]:
+    """Return actual 15-minute appointment starts for the requested service/date."""
+    enforce_rate_limit(request, bucket="public-availability", limit=40, window_seconds=60)
+    date_value = validate_iso_date(date_value, "date") or ""
+    selected_date = date.fromisoformat(date_value)
+    if selected_date < now_local().date():
+        raise HTTPException(status_code=422, detail="لا يمكن عرض مواعيد لتاريخ مضى.")
+    slots: list[dict[str, Any]] = []
+    with db() as con:
+        service = con.execute("SELECT id,name,duration_minutes,price FROM services WHERE id=? AND active=1", (service_id,)).fetchone()
+        if service is None:
+            raise HTTPException(status_code=404, detail="الخدمة غير متاحة.")
+        if barber_id is not None:
+            barbers = con.execute("SELECT id,name FROM barbers WHERE id=? AND active=1", (barber_id,)).fetchall()
+            if not barbers:
+                raise HTTPException(status_code=404, detail="الحلاق غير متاح.")
+        else:
+            barbers = con.execute("SELECT id,name FROM barbers WHERE active=1 ORDER BY name COLLATE NOCASE").fetchall()
+        if not barbers:
+            return {"date": date_value, "service": dict(service), "slots": []}
+        now = now_local().replace(tzinfo=None, second=0, microsecond=0)
+        for minutes in range(0, 24 * 60, 15):
+            start = datetime.combine(selected_date, datetime.min.time()) + timedelta(minutes=minutes)
+            if start < now:
+                continue
+            end = start + timedelta(minutes=int(service["duration_minutes"]))
+            try:
+                ensure_business_hours(con, start, end)
+            except HTTPException:
+                continue
+            for barber in barbers:
+                current_barber_id = int(barber["id"])
+                try:
+                    ensure_slot(con, current_barber_id, start.isoformat(timespec="minutes"), end.isoformat(timespec="minutes"))
+                    validate_barber_availability(con, current_barber_id, start, end)
+                except HTTPException as exc:
+                    if exc.status_code in {409, 422}:
+                        continue
+                    raise
+                slots.append({
+                    "start_at": start.isoformat(timespec="minutes"),
+                    "end_at": end.isoformat(timespec="minutes"),
+                    "barber_id": current_barber_id,
+                    "barber_name": barber["name"],
+                })
+    slots.sort(key=lambda item: (item["start_at"], item["barber_name"].casefold()))
+    return {"date": date_value, "service": dict(service), "slots": slots}
 
 
 @app.post("/api/public/appointments", status_code=201)
@@ -630,32 +871,91 @@ def public_book(payload: PublicAppointmentInput, request: Request) -> dict[str, 
     return {"message": "وصل طلب الحجز بنجاح، وسيؤكده الصالون.", "appointment": dict(row)}
 
 
+@app.post("/api/public/appointments/lookup")
+def public_appointment_lookup(payload: AppointmentLookupInput, request: Request) -> dict[str, Any]:
+    """Retrieve only one booking after matching its ID and phone number.
+
+    POST keeps the customer's phone out of URLs, browser history and ordinary
+    reverse-proxy access logs. The response deliberately omits personal data.
+    """
+    enforce_rate_limit(request, bucket="public-booking-lookup", limit=6, window_seconds=60)
+    with db() as con:
+        row = con.execute(
+            appointment_select_sql() + " WHERE a.id=? AND c.phone=?",
+            (payload.appointment_id, payload.phone.strip()),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="لم نعثر على الحجز. تحقق من رقم الحجز ورقم الهاتف.")
+    return {
+        "appointment": {
+            "id": row["id"],
+            "service_name": row["service_name"],
+            "barber_name": row["barber_name"] or "فريق الصالون",
+            "start_at": row["start_at"],
+            "end_at": row["end_at"],
+            "status": row["status"],
+            "price": clean_money(row["price"]),
+            "payment_status": row["payment_status"],
+            "refund_status": row["refund_status"],
+        }
+    }
+
+
 # ---- dashboard, appointments and customers -------------------------------
 @app.get("/api/dashboard")
-def dashboard(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def dashboard(user: dict[str, Any] = Depends(require_roles("admin", "manager", "receptionist", "cashier", "barber"))) -> dict[str, Any]:
     today = now_local().date().isoformat()
     month = today[:7]
+    role = user.get("role")
+    barber_id = user.get("barber_id") if role == "barber" else None
+    barber_filter = " AND barber_id=?" if role == "barber" else ""
+    barber_params: tuple[Any, ...] = (barber_id,) if role == "barber" else ()
     with db() as con:
-        today_count = con.execute("SELECT COUNT(*) FROM appointments WHERE substr(start_at,1,10)=? AND status!='cancelled'", (today,)).fetchone()[0]
-        pending = con.execute("SELECT COUNT(*) FROM appointments WHERE status='pending'").fetchone()[0]
-        active_customers = con.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
-        monthly_income = con.execute("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE kind='income' AND substr(transaction_date,1,7)=?", (month,)).fetchone()[0]
-        monthly_expenses = con.execute("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE kind='expense' AND substr(transaction_date,1,7)=?", (month,)).fetchone()[0]
-        upcoming = [dict(r) for r in con.execute(appointment_select_sql() + " WHERE a.start_at>=? AND a.status NOT IN ('cancelled','completed') ORDER BY a.start_at LIMIT 6", (now_iso(),)).fetchall()]
-        recent = [dict(r) for r in con.execute(appointment_select_sql() + " ORDER BY a.created_at DESC LIMIT 5").fetchall()]
-    return {
-        "date": today,
-        "metrics": {
-            "today_appointments": int(today_count),
-            "pending_appointments": int(pending),
-            "customers": int(active_customers),
-            "monthly_income": clean_money(monthly_income),
-            "monthly_expenses": clean_money(monthly_expenses),
-            "monthly_net": clean_money(monthly_income - monthly_expenses),
-        },
-        "upcoming": upcoming,
-        "recent": recent,
+        today_count = con.execute(
+            "SELECT COUNT(*) FROM appointments WHERE substr(start_at,1,10)=? AND status!='cancelled'" + barber_filter,
+            (today, *barber_params),
+        ).fetchone()[0]
+        pending = con.execute(
+            "SELECT COUNT(*) FROM appointments WHERE status='pending'" + barber_filter,
+            barber_params,
+        ).fetchone()[0]
+        if role in {"admin", "manager", "receptionist"}:
+            customer_count = con.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
+        elif role == "barber" and barber_id:
+            customer_count = con.execute("SELECT COUNT(DISTINCT customer_id) FROM appointments WHERE barber_id=?", (barber_id,)).fetchone()[0]
+        else:
+            customer_count = None
+        financial = {}
+        if role in {"admin", "manager", "cashier"}:
+            monthly_income = con.execute("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE kind='income' AND substr(transaction_date,1,7)=?", (month,)).fetchone()[0]
+            monthly_expenses = con.execute("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE kind='expense' AND substr(transaction_date,1,7)=?", (month,)).fetchone()[0]
+            financial = {
+                "monthly_income": clean_money(monthly_income),
+                "monthly_expenses": clean_money(monthly_expenses),
+                "monthly_net": clean_money(monthly_income - monthly_expenses),
+            }
+        upcoming_sql = appointment_select_sql() + " WHERE a.start_at>=? AND a.status NOT IN ('cancelled','completed')"
+        recent_sql = appointment_select_sql()
+        upcoming_params: tuple[Any, ...] = (now_iso(),)
+        recent_params: tuple[Any, ...] = ()
+        if role == "barber":
+            if not barber_id:
+                upcoming = []
+                recent = []
+            else:
+                upcoming = [dict(r) for r in con.execute(upcoming_sql + " AND a.barber_id=? ORDER BY a.start_at LIMIT 6", (now_iso(), barber_id)).fetchall()]
+                recent = [dict(r) for r in con.execute(recent_sql + " WHERE a.barber_id=? ORDER BY a.created_at DESC LIMIT 5", (barber_id,)).fetchall()]
+        else:
+            upcoming = [dict(r) for r in con.execute(upcoming_sql + " ORDER BY a.start_at LIMIT 6", upcoming_params).fetchall()]
+            recent = [dict(r) for r in con.execute(recent_sql + " ORDER BY a.created_at DESC LIMIT 5", recent_params).fetchall()]
+    metrics = {
+        "today_appointments": int(today_count),
+        "pending_appointments": int(pending),
+        **financial,
     }
+    if customer_count is not None:
+        metrics["customers"] = int(customer_count)
+    return {"date": today, "metrics": metrics, "upcoming": upcoming, "recent": recent}
 
 
 @app.get("/api/appointments")
@@ -666,7 +966,7 @@ def list_appointments(
     appointment_status: Optional[str] = Query(default=None, alias="status"),
     q: Optional[str] = None,
     limit: int = Query(default=300, ge=1, le=1000),
-    user: dict[str, Any] = Depends(current_user),
+    user: dict[str, Any] = Depends(require_roles("admin", "manager", "receptionist", "cashier", "barber")),
 ) -> list[dict[str, Any]]:
     date_filter = validate_iso_date(date_filter, "date")
     start_date = validate_iso_date(start_date, "start_date")
@@ -686,6 +986,11 @@ def list_appointments(
     if end_date:
         sql += " AND substr(a.start_at,1,10)<=?"
         params.append(end_date)
+    if user.get("role") == "barber":
+        if not user.get("barber_id"):
+            return []
+        sql += " AND a.barber_id=?"
+        params.append(user["barber_id"])
     if appointment_status:
         sql += " AND a.status=?"
         params.append(appointment_status)
@@ -700,7 +1005,7 @@ def list_appointments(
 
 
 @app.post("/api/appointments", status_code=201)
-def create_appointment(payload: AppointmentInput, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def create_appointment(payload: AppointmentInput, user: dict[str, Any] = Depends(require_roles("admin", "manager", "receptionist"))) -> dict[str, Any]:
     start = parse_local_start(payload.start_at)
     if start < now_local().replace(tzinfo=None) - timedelta(minutes=1):
         raise HTTPException(status_code=422, detail="لا يمكن إنشاء موعد في وقت مضى.")
@@ -730,13 +1035,33 @@ def create_appointment(payload: AppointmentInput, user: dict[str, Any] = Depends
 
 
 @app.patch("/api/appointments/{appointment_id}")
-def update_appointment(appointment_id: int, payload: AppointmentPatch, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def update_appointment(appointment_id: int, payload: AppointmentPatch, user: dict[str, Any] = Depends(require_roles("admin", "manager", "receptionist", "barber"))) -> dict[str, Any]:
     with db() as con:
+        con.execute("BEGIN IMMEDIATE")
         row = con.execute("SELECT * FROM appointments WHERE id=?", (appointment_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="الموعد غير موجود.")
-        if row["payment_status"] == "paid" and payload.status == "cancelled":
-            raise HTTPException(status_code=409, detail="الموعد مدفوع. نفّذ إجراء استرداد مالي قبل إلغائه.")
+        if user.get("role") == "barber":
+            if row["barber_id"] != user.get("barber_id"):
+                raise HTTPException(status_code=403, detail="يمكنك إدارة المواعيد المسندة إليك فقط.")
+            if payload.start_at is not None or payload.barber_id is not None or payload.notes is not None or payload.status not in (None, "completed"):
+                raise HTTPException(status_code=403, detail="صلاحية الحلاق تتيح تحديد اكتمال الخدمة للموعد المسند إليه فقط.")
+            if payload.status == "completed" and row["status"] in {"cancelled", "completed"}:
+                raise HTTPException(status_code=409, detail="لا يمكن إتمام خدمة لموعد ملغي أو مكتمل مسبقًا.")
+            if payload.status == "completed" and parse_local_start(row["start_at"]) > now_local().replace(tzinfo=None):
+                raise HTTPException(status_code=409, detail="لا يمكن تسجيل اكتمال الخدمة قبل بدء الموعد.")
+        if row["status"] == "completed" and payload.status not in (None, "completed"):
+            raise HTTPException(status_code=409, detail="الموعد المكتمل حالة نهائية؛ لا يمكن إعادة فتحه أو إلغاؤه. أنشئ حجزًا جديدًا عند الحاجة.")
+        if row["status"] == "completed" and (payload.start_at is not None or payload.barber_id is not None):
+            raise HTTPException(status_code=409, detail="لا يمكن نقل موعد اكتملت خدمته.")
+        if row["status"] == "cancelled" and payload.status == "completed":
+            raise HTTPException(status_code=409, detail="أعد تأكيد الموعد أولًا، ولا تسجّل خدمة لموعد ملغي كمكتملة مباشرة.")
+        if payload.status == "completed" and parse_local_start(row["start_at"]) > now_local().replace(tzinfo=None):
+            raise HTTPException(status_code=409, detail="لا يمكن تسجيل اكتمال الخدمة قبل موعدها.")
+        if row["payment_status"] == "paid" and row["refund_status"] != "refunded" and payload.status == "cancelled":
+            raise HTTPException(status_code=409, detail="الموعد مدفوع. نفّذ استردادًا ماليًا قبل إلغائه.")
+        if row["payment_status"] == "paid" and row["refund_status"] != "refunded" and (payload.start_at is not None or payload.barber_id is not None):
+            raise HTTPException(status_code=409, detail="لا يمكن نقل موعد مدفوع قبل تنفيذ الاسترداد المالي.")
         start_s, end_s, barber_id = row["start_at"], row["end_at"], row["barber_id"]
         if payload.start_at is not None:
             start = parse_local_start(payload.start_at)
@@ -763,6 +1088,7 @@ def update_appointment(appointment_id: int, payload: AppointmentPatch, user: dic
                     barber_id = choose_barber(con, None, parse_local_start(start_s), parse_local_start(end_s), exclude_id=appointment_id)
                 else:
                     ensure_slot(con, int(barber_id), start_s, end_s, exclude_id=appointment_id)
+                    validate_barber_availability(con, int(barber_id), parse_local_start(start_s), parse_local_start(end_s))
         notes_value = payload.notes if payload.notes is not None else row["notes"]
         con.execute("UPDATE appointments SET start_at=?,end_at=?,barber_id=?,status=?,notes=?,updated_at=? WHERE id=?", (start_s, end_s, barber_id, status_value, notes_value, now_iso(), appointment_id))
         updated = con.execute(appointment_select_sql() + " WHERE a.id=?", (appointment_id,)).fetchone()
@@ -770,24 +1096,52 @@ def update_appointment(appointment_id: int, payload: AppointmentPatch, user: dic
 
 
 @app.post("/api/appointments/{appointment_id}/pay")
-def pay_appointment(appointment_id: int, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def pay_appointment(appointment_id: int, payload: PaymentInput = Body(default=PaymentInput()), user: dict[str, Any] = Depends(require_roles("admin", "manager", "cashier"))) -> dict[str, Any]:
     with db() as con:
         con.execute("BEGIN IMMEDIATE")
         row = con.execute(appointment_select_sql() + " WHERE a.id=?", (appointment_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="الموعد غير موجود.")
-        state = con.execute("SELECT payment_status FROM appointments WHERE id=?", (appointment_id,)).fetchone()[0]
-        if state == "paid":
+        if row["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="لا يمكن تحصيل موعد ملغي.")
+        if row["payment_status"] == "paid":
             raise HTTPException(status_code=409, detail="تم تسجيل تحصيل هذا الموعد سابقًا.")
-        con.execute("INSERT INTO transactions(kind,category,amount,transaction_date,note,appointment_id,created_at) VALUES('income',?,?,?,?,?,?)", (f"خدمة: {row['service_name']}", row["price"], now_local().date().isoformat(), f"تحصيل من {row['customer_name']}", appointment_id, now_iso()))
-        con.execute("UPDATE appointments SET payment_status='paid',status=CASE WHEN status='cancelled' THEN status ELSE 'completed' END,updated_at=? WHERE id=?", (now_iso(), appointment_id))
-    return {"message": "تم تسجيل التحصيل وتحديث الإيرادات.", "appointment_id": appointment_id}
+        if row["refund_status"] == "refunded":
+            raise HTTPException(status_code=409, detail="هذا الموعد مسترد ولا يمكن تحصيله مجددًا.")
+        con.execute(
+            "INSERT INTO transactions(kind,category,amount,transaction_date,note,appointment_id,payment_method,created_at) VALUES('income',?,?,?,?,?,?,?)",
+            (f"خدمة: {row['service_name']}", clean_money(row["price"]), now_local().date().isoformat(), f"تحصيل من {row['customer_name']}", appointment_id, payload.payment_method, now_iso()),
+        )
+        con.execute("UPDATE appointments SET payment_status='paid',updated_at=? WHERE id=?", (now_iso(), appointment_id))
+    return {"message": "تم تسجيل التحصيل دون تغيير حالة تنفيذ الموعد.", "appointment_id": appointment_id, "payment_method": payload.payment_method}
+
+
+@app.post("/api/appointments/{appointment_id}/refund")
+def refund_appointment(appointment_id: int, payload: RefundInput = Body(default=RefundInput()), user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, Any]:
+    with db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute(appointment_select_sql() + " WHERE a.id=?", (appointment_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="الموعد غير موجود.")
+        if row["payment_status"] != "paid":
+            raise HTTPException(status_code=409, detail="لا يمكن استرداد موعد لم يتم تحصيله.")
+        if row["refund_status"] == "refunded":
+            raise HTTPException(status_code=409, detail="تم استرداد هذا الموعد سابقًا.")
+        con.execute(
+            "INSERT INTO transactions(kind,category,amount,transaction_date,note,appointment_id,payment_method,created_at) VALUES('expense','appointment_refund',?,?,?,?,?,?)",
+            (clean_money(row["price"]), now_local().date().isoformat(), f"استرداد حجز #{appointment_id} — {row['customer_name']} {payload.note.strip()}".strip(), appointment_id, payload.payment_method, now_iso()),
+        )
+        # Refunding an upcoming booking releases the barber's slot by cancelling it.
+        # A refund against a service already completed is kept as a financial adjustment.
+        next_status = "cancelled" if row["status"] in {"pending", "confirmed"} else row["status"]
+        con.execute("UPDATE appointments SET refund_status='refunded',status=?,updated_at=? WHERE id=?", (next_status, now_iso(), appointment_id))
+    return {"message": "تم تسجيل الاسترداد في دفتر الصندوق.", "appointment_id": appointment_id, "payment_method": payload.payment_method, "appointment_status": next_status}
 
 
 @app.get("/api/customers")
-def list_customers(q: Optional[str] = None, limit: int = Query(default=500, ge=1, le=1000), user: dict[str, Any] = Depends(current_user)) -> list[dict[str, Any]]:
+def list_customers(q: Optional[str] = None, limit: int = Query(default=500, ge=1, le=1000), user: dict[str, Any] = Depends(require_roles("admin", "manager", "receptionist"))) -> list[dict[str, Any]]:
     sql = """SELECT c.id,c.name,c.phone,c.email,c.notes,c.created_at,COUNT(a.id) AS appointments_count,
-             COALESCE(SUM(CASE WHEN a.payment_status='paid' THEN a.price ELSE 0 END),0) AS total_spend,
+             COALESCE(SUM(CASE WHEN a.payment_status='paid' AND a.refund_status!='refunded' THEN a.price ELSE 0 END),0) AS total_spend,
              MAX(a.start_at) AS last_appointment
              FROM customers c LEFT JOIN appointments a ON a.customer_id=c.id"""
     params: list[Any] = []
@@ -802,7 +1156,7 @@ def list_customers(q: Optional[str] = None, limit: int = Query(default=500, ge=1
 
 
 @app.post("/api/customers", status_code=201)
-def create_customer(payload: CustomerInput, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def create_customer(payload: CustomerInput, user: dict[str, Any] = Depends(require_roles("admin", "manager", "receptionist"))) -> dict[str, Any]:
     with db() as con:
         existing = con.execute("SELECT id FROM customers WHERE phone=?", (payload.phone.strip(),)).fetchone()
         if existing:
@@ -813,7 +1167,7 @@ def create_customer(payload: CustomerInput, user: dict[str, Any] = Depends(curre
 
 
 @app.patch("/api/customers/{customer_id}")
-def edit_customer(customer_id: int, payload: CustomerInput, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def edit_customer(customer_id: int, payload: CustomerInput, user: dict[str, Any] = Depends(require_roles("admin", "manager", "receptionist"))) -> dict[str, Any]:
     with db() as con:
         if not con.execute("SELECT id FROM customers WHERE id=?", (customer_id,)).fetchone():
             raise HTTPException(status_code=404, detail="العميل غير موجود.")
@@ -827,7 +1181,7 @@ def edit_customer(customer_id: int, payload: CustomerInput, user: dict[str, Any]
 
 # ---- barber and service management ---------------------------------------
 @app.get("/api/barbers")
-def list_barbers(user: dict[str, Any] = Depends(current_user)) -> list[dict[str, Any]]:
+def list_barbers(user: dict[str, Any] = Depends(require_roles("admin", "manager", "receptionist", "cashier", "barber"))) -> list[dict[str, Any]]:
     with db() as con:
         return [dict(r) for r in con.execute("""SELECT b.id,b.name,b.phone,b.specialty,b.active,b.created_at,
                   COUNT(CASE WHEN a.status NOT IN ('cancelled') THEN 1 END) AS appointments_count,
@@ -836,7 +1190,7 @@ def list_barbers(user: dict[str, Any] = Depends(current_user)) -> list[dict[str,
 
 
 @app.post("/api/barbers", status_code=201)
-def create_barber(payload: BarberInput, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def create_barber(payload: BarberInput, user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, Any]:
     with db() as con:
         cursor = con.execute("INSERT INTO barbers(name,phone,specialty,active,created_at) VALUES(?,?,?,?,?)", (payload.name, payload.phone.strip(), payload.specialty.strip(), int(payload.active), now_iso()))
         row = con.execute("SELECT * FROM barbers WHERE id=?", (cursor.lastrowid,)).fetchone()
@@ -844,7 +1198,7 @@ def create_barber(payload: BarberInput, user: dict[str, Any] = Depends(current_u
 
 
 @app.patch("/api/barbers/{barber_id}")
-def update_barber(barber_id: int, payload: BarberInput, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def update_barber(barber_id: int, payload: BarberInput, user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, Any]:
     with db() as con:
         if not con.execute("SELECT id FROM barbers WHERE id=?", (barber_id,)).fetchone():
             raise HTTPException(status_code=404, detail="الحلاق غير موجود.")
@@ -854,7 +1208,7 @@ def update_barber(barber_id: int, payload: BarberInput, user: dict[str, Any] = D
 
 
 @app.delete("/api/barbers/{barber_id}")
-def deactivate_barber(barber_id: int, user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
+def deactivate_barber(barber_id: int, user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, str]:
     with db() as con:
         cursor = con.execute("UPDATE barbers SET active=0 WHERE id=?", (barber_id,))
         if cursor.rowcount == 0:
@@ -862,8 +1216,97 @@ def deactivate_barber(barber_id: int, user: dict[str, Any] = Depends(current_use
     return {"message": "تم إيقاف الحلاق دون حذف سجل مواعيده."}
 
 
+@app.get("/api/barbers/{barber_id}/shifts")
+def get_barber_shifts(barber_id: int, user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> list[dict[str, Any]]:
+    with db() as con:
+        if not con.execute("SELECT id FROM barbers WHERE id=?", (barber_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="الحلاق غير موجود.")
+        return [dict(row) for row in con.execute("SELECT id,weekday,start_time,end_time,active FROM barber_shifts WHERE barber_id=? ORDER BY weekday,start_time", (barber_id,)).fetchall()]
+
+
+@app.put("/api/barbers/{barber_id}/shifts")
+def replace_barber_shifts(barber_id: int, shifts: list[BarberShiftInput] = Body(default=[]), user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, Any]:
+    if len(shifts) > 21:
+        raise HTTPException(status_code=422, detail="يمكن تسجيل 21 فترة دوام كحد أقصى للحلاق.")
+    normalized, seen = [], set()
+    for shift in shifts:
+        try:
+            start = datetime.strptime(shift.start_time, "%H:%M")
+            end = datetime.strptime(shift.end_time, "%H:%M")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="صيغة الدوام يجب أن تكون HH:MM.") from exc
+        if start >= end:
+            raise HTTPException(status_code=422, detail="وقت نهاية الدوام يجب أن يأتي بعد وقت بدايته.")
+        key = (shift.weekday, shift.start_time, shift.end_time)
+        if key in seen:
+            raise HTTPException(status_code=422, detail="توجد فترة دوام مكررة.")
+        for day, other_start, other_end in seen:
+            if day == shift.weekday and start.time() < datetime.strptime(other_end, "%H:%M").time() and end.time() > datetime.strptime(other_start, "%H:%M").time():
+                raise HTTPException(status_code=422, detail="تتداخل فترات الدوام في اليوم نفسه.")
+        seen.add(key)
+        normalized.append((shift.weekday, shift.start_time, shift.end_time, int(shift.active)))
+    with db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        if not con.execute("SELECT id FROM barbers WHERE id=?", (barber_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="الحلاق غير موجود.")
+        con.execute("DELETE FROM barber_shifts WHERE barber_id=?", (barber_id,))
+        con.executemany("INSERT INTO barber_shifts(barber_id,weekday,start_time,end_time,active) VALUES(?,?,?,?,?)", [(barber_id, *row) for row in normalized])
+        upcoming = con.execute(
+            "SELECT start_at,end_at FROM appointments WHERE barber_id=? AND status NOT IN ('cancelled','completed') AND start_at>=?",
+            (barber_id, now_iso()),
+        ).fetchall()
+        for appointment in upcoming:
+            try:
+                validate_barber_availability(
+                    con, barber_id,
+                    parse_local_start(appointment["start_at"]),
+                    parse_local_start(appointment["end_at"]),
+                )
+            except HTTPException as exc:
+                if exc.status_code == 409:
+                    raise HTTPException(status_code=409, detail="الجدول الجديد يتعارض مع حجوزات مستقبلية مؤكدة. انقل هذه الحجوزات أو ألغها قبل حفظ الدوام.") from exc
+                raise
+        rows = [dict(row) for row in con.execute("SELECT id,weekday,start_time,end_time,active FROM barber_shifts WHERE barber_id=? ORDER BY weekday,start_time", (barber_id,)).fetchall()]
+    return {"shifts": rows, "fallback_to_salon_hours": not bool(rows)}
+
+
+@app.get("/api/barbers/{barber_id}/time-off")
+def get_barber_time_off(barber_id: int, user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> list[dict[str, Any]]:
+    with db() as con:
+        if not con.execute("SELECT id FROM barbers WHERE id=?", (barber_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="الحلاق غير موجود.")
+        return [dict(row) for row in con.execute("SELECT id,start_at,end_at,reason FROM barber_time_off WHERE barber_id=? AND end_at>=? ORDER BY start_at LIMIT 100", (barber_id, now_iso())).fetchall()]
+
+
+@app.post("/api/barbers/{barber_id}/time-off", status_code=201)
+def create_barber_time_off(barber_id: int, payload: BarberTimeOffInput, user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, Any]:
+    start = parse_local_start(payload.start_at)
+    end = parse_local_start(payload.end_at)
+    if end <= start:
+        raise HTTPException(status_code=422, detail="نهاية الإجازة يجب أن تأتي بعد بدايتها.")
+    with db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        if not con.execute("SELECT id FROM barbers WHERE id=? AND active=1", (barber_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="الحلاق غير موجود أو غير نشط.")
+        overlap = con.execute("SELECT id FROM appointments WHERE barber_id=? AND status NOT IN ('cancelled') AND start_at<? AND end_at>? LIMIT 1", (barber_id, end.isoformat(timespec="minutes"), start.isoformat(timespec="minutes"))).fetchone()
+        if overlap:
+            raise HTTPException(status_code=409, detail="تتداخل الإجازة مع موعد قائم؛ انقل الموعد أو ألغِه أولًا.")
+        cur = con.execute("INSERT INTO barber_time_off(barber_id,start_at,end_at,reason,created_at) VALUES(?,?,?,?,?)", (barber_id, start.isoformat(timespec="minutes"), end.isoformat(timespec="minutes"), payload.reason.strip(), now_iso()))
+        row = con.execute("SELECT id,start_at,end_at,reason FROM barber_time_off WHERE id=?", (cur.lastrowid,)).fetchone()
+    return {"time_off": dict(row)}
+
+
+@app.delete("/api/barbers/{barber_id}/time-off/{time_off_id}")
+def delete_barber_time_off(barber_id: int, time_off_id: int, user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, str]:
+    with db() as con:
+        cur = con.execute("DELETE FROM barber_time_off WHERE id=? AND barber_id=?", (time_off_id, barber_id))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="فترة الإجازة غير موجودة.")
+    return {"message": "تم حذف فترة عدم التوفر."}
+
+
 @app.get("/api/services")
-def list_services(include_inactive: bool = False, user: dict[str, Any] = Depends(current_user)) -> list[dict[str, Any]]:
+def list_services(include_inactive: bool = False, user: dict[str, Any] = Depends(require_roles("admin", "manager", "receptionist", "cashier", "barber"))) -> list[dict[str, Any]]:
     with db() as con:
         where = "" if include_inactive else "WHERE s.active=1"
         return [dict(r) for r in con.execute(f"""SELECT s.*,COUNT(a.id) AS bookings_count FROM services s
@@ -871,25 +1314,25 @@ def list_services(include_inactive: bool = False, user: dict[str, Any] = Depends
 
 
 @app.post("/api/services", status_code=201)
-def create_service(payload: ServiceInput, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def create_service(payload: ServiceInput, user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, Any]:
     with db() as con:
-        cursor = con.execute("INSERT INTO services(name,description,duration_minutes,price,active,created_at) VALUES(?,?,?,?,?,?)", (payload.name, payload.description, payload.duration_minutes, payload.price, int(payload.active), now_iso()))
+        cursor = con.execute("INSERT INTO services(name,description,duration_minutes,price,active,created_at) VALUES(?,?,?,?,?,?)", (payload.name, payload.description, payload.duration_minutes, clean_money(payload.price), int(payload.active), now_iso()))
         row = con.execute("SELECT * FROM services WHERE id=?", (cursor.lastrowid,)).fetchone()
     return {"service": dict(row)}
 
 
 @app.put("/api/services/{service_id}")
-def update_service(service_id: int, payload: ServiceInput, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def update_service(service_id: int, payload: ServiceInput, user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, Any]:
     with db() as con:
         if not con.execute("SELECT id FROM services WHERE id=?", (service_id,)).fetchone():
             raise HTTPException(status_code=404, detail="الخدمة غير موجودة.")
-        con.execute("UPDATE services SET name=?,description=?,duration_minutes=?,price=?,active=? WHERE id=?", (payload.name, payload.description, payload.duration_minutes, payload.price, int(payload.active), service_id))
+        con.execute("UPDATE services SET name=?,description=?,duration_minutes=?,price=?,active=? WHERE id=?", (payload.name, payload.description, payload.duration_minutes, clean_money(payload.price), int(payload.active), service_id))
         row = con.execute("SELECT * FROM services WHERE id=?", (service_id,)).fetchone()
     return {"service": dict(row)}
 
 
 @app.delete("/api/services/{service_id}")
-def deactivate_service(service_id: int, user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
+def deactivate_service(service_id: int, user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, str]:
     with db() as con:
         cursor = con.execute("UPDATE services SET active=0 WHERE id=?", (service_id,))
         if cursor.rowcount == 0:
@@ -899,7 +1342,7 @@ def deactivate_service(service_id: int, user: dict[str, Any] = Depends(current_u
 
 # ---- cashbook and settings -----------------------------------------------
 @app.get("/api/finance/summary")
-def finance_summary(start_date: Optional[str] = None, end_date: Optional[str] = None, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+def finance_summary(start_date: Optional[str] = None, end_date: Optional[str] = None, user: dict[str, Any] = Depends(require_roles("admin", "manager", "cashier"))) -> dict[str, Any]:
     start_date = validate_iso_date(start_date, "start_date")
     end_date = validate_iso_date(end_date, "end_date")
     if start_date and end_date and start_date > end_date:
@@ -928,25 +1371,27 @@ def finance_summary(start_date: Optional[str] = None, end_date: Optional[str] = 
 
 
 @app.post("/api/finance/transactions", status_code=201)
-def create_transaction(payload: TransactionInput, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
-    try:
-        date.fromisoformat(payload.transaction_date)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="تاريخ الحركة المالية غير صالح.") from exc
+def create_transaction(payload: TransactionInput, user: dict[str, Any] = Depends(require_roles("admin", "manager", "cashier"))) -> dict[str, Any]:
+    validate_iso_date(payload.transaction_date, "transaction_date")
+    amount = clean_money(payload.amount)
+    if amount <= 0:
+        raise HTTPException(status_code=422, detail="يجب أن يكون المبلغ أكبر من صفر بعد التقريب إلى منزلتين عشريتين.")
     with db() as con:
-        cursor = con.execute("INSERT INTO transactions(kind,category,amount,transaction_date,note,created_at) VALUES(?,?,?,?,?,?)", (payload.kind, payload.category.strip(), clean_money(payload.amount), payload.transaction_date, payload.note.strip(), now_iso()))
+        cursor = con.execute("INSERT INTO transactions(kind,category,amount,transaction_date,note,payment_method,created_at) VALUES(?,?,?,?,?,?,?)", (payload.kind, payload.category.strip(), amount, payload.transaction_date, payload.note.strip(), payload.payment_method, now_iso()))
         row = con.execute("SELECT * FROM transactions WHERE id=?", (cursor.lastrowid,)).fetchone()
     return {"transaction": dict(row)}
 
 
 @app.get("/api/settings")
-def read_settings(user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
+def read_settings(user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, str]:
     with db() as con:
-        return get_settings(con)
+        result = get_settings(con)
+    result["timezone"] = TIMEZONE
+    return result
 
 
 @app.put("/api/settings")
-def update_settings(payload: SettingsInput, user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
+def update_settings(payload: SettingsInput, user: dict[str, Any] = Depends(require_roles("admin", "manager"))) -> dict[str, str]:
     allowed = {"business_name", "currency", "phone", "address", "open_time", "close_time", "theme"}
     if not set(payload.settings).issubset(allowed):
         raise HTTPException(status_code=422, detail="تتضمن الإعدادات حقولًا غير معروفة.")
@@ -966,11 +1411,32 @@ def update_settings(payload: SettingsInput, user: dict[str, Any] = Depends(curre
     with db() as con:
         for key, value in payload.settings.items():
             con.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value.strip()[:200]))
-        return get_settings(con)
+        result = get_settings(con)
+    result["timezone"] = TIMEZONE
+    return result
+
+
+@app.get("/api/backup")
+def download_database_backup(user: dict[str, Any] = Depends(require_roles("admin"))) -> StreamingResponse:
+    """Download a transactionally consistent SQLite snapshot; only the owner can access it."""
+    source = sqlite3.connect(str(DB_PATH), timeout=30)
+    destination = sqlite3.connect(":memory:")
+    try:
+        source.backup(destination, pages=256, sleep=0.05)
+        snapshot = destination.serialize()
+    finally:
+        destination.close()
+        source.close()
+    filename = f"saloon-dreem-backup-{now_local().date().isoformat()}.db"
+    return StreamingResponse(
+        iter([snapshot]),
+        media_type="application/vnd.sqlite3",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/export/appointments.csv")
-def export_appointments(user: dict[str, Any] = Depends(current_user)) -> StreamingResponse:
+def export_appointments(user: dict[str, Any] = Depends(require_roles("admin", "manager", "receptionist"))) -> StreamingResponse:
     with db() as con:
         rows = con.execute(appointment_select_sql() + " ORDER BY a.start_at DESC").fetchall()
     output = io.StringIO(newline="")

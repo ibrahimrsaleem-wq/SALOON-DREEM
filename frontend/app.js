@@ -3,13 +3,34 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const money = (value) => new Intl.NumberFormat('ar-PS', { style: 'currency', currency: settings.currency || 'ILS', maximumFractionDigits: 2 }).format(Number(value || 0));
-const dateLabel = (value, options = { day: 'numeric', month: 'short', year: 'numeric' }) => value ? new Intl.DateTimeFormat('ar-PS', options).format(new Date(value.length === 10 ? `${value}T12:00:00` : value)) : '—';
-const timeLabel = (value) => value ? new Intl.DateTimeFormat('ar-PS', { hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '—';
-const localISODate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-const localDateTime = (d = new Date()) => `${localISODate(d)}T${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+const dateLabel = (value, options = { day: 'numeric', month: 'short', year: 'numeric' }) => {
+    if (!value) return '—';
+    const datePart = String(value).slice(0, 10);
+    const [year, month, day] = datePart.split('-').map(Number);
+    if (![year, month, day].every(Number.isFinite)) return '—';
+    // API timestamps are salon-local wall-clock values without an offset. Format them as
+    // calendar dates, not browser-local instants, so a remote phone cannot shift the day.
+    return new Intl.DateTimeFormat('ar-PS', { ...options, timeZone: 'UTC' }).format(new Date(Date.UTC(year, month - 1, day, 12)));
+};
+const timeLabel = (value) => {
+    if (!value) return '—';
+    const match = String(value).match(/T(\d{2}):(\d{2})/);
+    if (!match) return '—';
+    const hour = Number(match[1]), minute = Number(match[2]);
+    if (hour > 23 || minute > 59) return '—';
+    return new Intl.DateTimeFormat('ar-PS', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }).format(new Date(Date.UTC(2000, 0, 1, hour, minute)));
+};
+const salonDateParts = (d = new Date()) => {
+    const timeZone = settings.timezone || undefined;
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(d);
+    return Object.fromEntries(parts.filter(x => x.type !== 'literal').map(x => [x.type, x.value]));
+};
+const localISODate = (d = new Date()) => { const p = salonDateParts(d); return `${p.year}-${p.month}-${p.day}`; };
+const salonISODateOffset = (days = 0) => { const [year, month, day] = localISODate().split('-').map(Number); return new Date(Date.UTC(year, month - 1, day + days, 12)).toISOString().slice(0, 10); };
+const localDateTime = (d = new Date()) => { const p = salonDateParts(d); return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`; };
 const statusLabel = (status) => ({ pending: 'بانتظار التأكيد', confirmed: 'مؤكد', completed: 'مكتمل', cancelled: 'ملغي' }[status] || status);
 const statusClass = (status) => ({ pending: 'pending', confirmed: 'confirmed', completed: 'completed', cancelled: 'cancelled' }[status] || 'neutral');
-const initialToken = localStorage.getItem('sd_access_token') || '';
+const initialToken = sessionStorage.getItem('sd_access_token') || '';
 let token = initialToken;
 let user = null;
 let view = 'dashboard';
@@ -18,6 +39,7 @@ let cachedServices = [];
 let cachedBarbers = [];
 let customerPrefillService = '';
 let activeCustomerView = 'discover';
+let availabilityRequestId = 0;
 async function api(path, init = {}) {
     const headers = new Headers(init.headers || {});
     if (token)
@@ -31,7 +53,7 @@ async function api(path, init = {}) {
         if (response.status === 401 && token) {
             token = '';
             user = null;
-            localStorage.removeItem('sd_access_token');
+            sessionStorage.removeItem('sd_access_token');
         }
         throw new Error(data?.detail || data?.message || `تعذر إتمام الطلب (${response.status}).`);
     }
@@ -63,9 +85,9 @@ function showAuth(setup) {
     password.placeholder = setup ? '٨ أحرف على الأقل' : 'أدخل كلمة المرور';
     $('#auth-password-confirm')?.toggleAttribute('required', setup);
     $('#auth-submit').innerHTML = setup ? 'إنشاء حساب المدير <span>←</span>' : 'تسجيل الدخول <span>←</span>';
-    $('#auth-footnote').textContent = setup ? 'اختر كلمة مرور قوية. لا توجد كلمة مرور افتراضية.' : 'بيانات الإدارة محفوظة في قاعدة بيانات الصالون على هذا الجهاز.';
+    $('#auth-footnote').textContent = setup ? 'اختر كلمة مرور قوية. لا توجد كلمة مرور افتراضية.' : 'بيانات الإدارة محفوظة في قاعدة بيانات الصالون على الخادم المتصل.';
 }
-function setToken(value) { token = value; localStorage.setItem('sd_access_token', value); }
+function setToken(value) { token = value; sessionStorage.setItem('sd_access_token', value); }
 async function init() {
     const baseInput = $('#api-base-input');
     baseInput.value = apiBase();
@@ -81,7 +103,7 @@ async function init() {
             }
             catch {
                 token = '';
-                localStorage.removeItem('sd_access_token');
+                sessionStorage.removeItem('sd_access_token');
             }
         }
         showAuth(setup.setup_required);
@@ -99,15 +121,23 @@ async function enterAdmin() {
     $('#customer-screen')?.classList.add('hidden');
     $('#app-shell')?.classList.remove('hidden');
     $('#account-username').textContent = user?.username || 'المدير';
-    $('#today-label').textContent = dateLabel(localISODate());
+    const roleNames = { admin: 'مدير النظام', manager: 'مدير', receptionist: 'استقبال', cashier: 'كاشير', barber: 'حلاق' };
+    const roleLabel = document.querySelector('.account-row small');
+    if (roleLabel) roleLabel.textContent = roleNames[user?.role] || 'موظف';
     try {
-        settings = await api('/api/settings');
+        if (['admin', 'manager'].includes(user?.role)) {
+            settings = await api('/api/settings');
+            localStorage.removeItem('sd_theme');
+        } else {
+            settings = { ...settings, ...await api('/api/public/settings'), theme: localStorage.getItem('sd_theme') || settings.theme || 'dark' };
+        }
         applyTheme();
         $('#sidebar-salon-name').textContent = settings.business_name || 'SALOON DREEM';
     }
     catch (e) {
         toast(errorText(e), 'error');
     }
+    $('#today-label').textContent = dateLabel(localISODate());
     try {
         cachedServices = await api('/api/services?include_inactive=true');
         cachedBarbers = await api('/api/barbers');
@@ -115,6 +145,9 @@ async function enterAdmin() {
     catch (e) {
         toast(errorText(e), 'error');
     }
+    $$('.nav-item[data-view]').forEach(el => { el.hidden = !allowedViews().includes(el.dataset.view); });
+    $('#quick-book')?.classList.toggle('hidden', !['admin', 'manager', 'receptionist'].includes(user?.role));
+    if (!allowedViews().includes(view)) view = 'dashboard';
     await renderView(view);
 }
 function errorText(error) { return error instanceof Error ? error.message : 'حدث خطأ غير متوقع.'; }
@@ -124,20 +157,36 @@ function applyTheme() {
     if (theme)
         theme.setAttribute('content', settings.theme === 'light' ? '#f4f1e8' : '#101916');
 }
-function setView(next) { view = next; renderView(next); $$('.nav-item[data-view]').forEach(el => el.classList.toggle('active', el.getAttribute('data-view') === next)); closeSidebar(); }
+const ROLE_VIEWS = {
+    admin: ['dashboard', 'appointments', 'customers', 'barbers', 'services', 'finance', 'reports', 'settings', 'users'],
+    manager: ['dashboard', 'appointments', 'customers', 'barbers', 'services', 'finance', 'reports', 'settings'],
+    receptionist: ['dashboard', 'appointments', 'customers', 'barbers', 'services'],
+    cashier: ['dashboard', 'appointments', 'finance'],
+    barber: ['dashboard', 'appointments', 'services']
+};
+function allowedViews() { return ROLE_VIEWS[user?.role || 'admin'] || ROLE_VIEWS.admin; }
+function setView(next) {
+    if (!allowedViews().includes(next)) { toast('ليست لديك صلاحية لفتح هذه الصفحة.', 'error'); return; }
+    view = next; void renderView(next);
+    $$('.nav-item[data-view]').forEach(el => el.classList.toggle('active', el.getAttribute('data-view') === next)); closeSidebar();
+}
 function closeSidebar() { $('#sidebar')?.classList.remove('sidebar-open'); $('#sidebar-backdrop')?.classList.remove('visible'); }
 function openSidebar() { $('#sidebar')?.classList.add('sidebar-open'); $('#sidebar-backdrop')?.classList.add('visible'); }
 function pageHeader(kicker, title, description, action = '') { return `<div class="page-heading"><div><p class="eyebrow">${kicker}</p><h2>${title}</h2><p class="muted">${description}</p></div>${action}</div>`; }
 function emptyState(icon, title, description, button = '') { return `<div class="empty-state"><div class="empty-icon">${icon}</div><h3>${title}</h3><p>${description}</p>${button}</div>`; }
 function actionButton(action, label, icon = '', extra = '') { return `<button type="button" class="button button-secondary button-small" data-action="${action}" ${extra}>${icon ? `<span>${icon}</span> ` : ''}${label}</button>`; }
 function appointmentsTable(rows, compact = false) {
-    if (!rows.length)
-        return emptyState('◷', 'لا توجد مواعيد هنا', 'ستظهر الحجوزات بمجرد إضافتها.');
-    return `<div class="table-wrap"><table><thead><tr><th>العميل</th><th>الخدمة</th><th>الحلاق</th><th>التاريخ والوقت</th><th>الحالة</th><th>القيمة</th>${compact ? '' : '<th>إجراءات</th>'}</tr></thead><tbody>${rows.map(a => `<tr><td><div class="person-cell"><span class="person-avatar">${escapeHtml((a.customer_name || 'ع').trim().slice(0, 1))}</span><div><strong>${escapeHtml(a.customer_name)}</strong><small>${escapeHtml(a.customer_phone)}</small></div></div></td><td>${escapeHtml(a.service_name)}</td><td>${escapeHtml(a.barber_name || 'غير محدد')}</td><td><strong>${dateLabel(a.start_at, { day: 'numeric', month: 'short' })}</strong><small class="cell-sub">${timeLabel(a.start_at)}</small></td><td><span class="status-pill status-${statusClass(a.status)}">${statusLabel(a.status)}</span></td><td>${money(a.price)}<small class="cell-sub">${a.payment_status === 'paid' ? 'مدفوع' : 'غير مدفوع'}</small></td>${compact ? '' : `<td><div class="table-actions"><button class="icon-button" title="تحديث الحالة" aria-label="تحديث حالة الموعد" data-action="appointment-status" data-id="${a.id}" data-status="${a.status}">•••</button>${a.payment_status === 'paid' ? '' : `<button class="button button-small button-primary" data-action="pay" data-id="${a.id}">تحصيل</button>`}</div></td>`}</tr>`).join('')}</tbody></table></div>`;
+    if (!rows.length) return emptyState('◷', 'لا توجد مواعيد هنا', 'ستظهر الحجوزات بمجرد إضافتها.');
+    const canManage = ['admin', 'manager', 'receptionist'].includes(user?.role);
+    const canComplete = user?.role === 'barber';
+    const canPay = ['admin', 'manager', 'cashier'].includes(user?.role);
+    const canRefund = ['admin', 'manager'].includes(user?.role);
+    return `<div class="table-wrap"><table><thead><tr><th>العميل</th><th>الخدمة</th><th>الحلاق</th><th>التاريخ والوقت</th><th>حالة الخدمة</th><th>القيمة والتحصيل</th>${compact ? '' : '<th>إجراءات</th>'}</tr></thead><tbody>${rows.map(a => `<tr><td><div class="person-cell"><span class="person-avatar">${escapeHtml((a.customer_name || 'ع').trim().slice(0, 1))}</span><div><strong>${escapeHtml(a.customer_name)}</strong><small>${escapeHtml(a.customer_phone)}</small></div></div></td><td>${escapeHtml(a.service_name)}</td><td>${escapeHtml(a.barber_name || 'غير محدد')}</td><td><strong>${dateLabel(a.start_at, { day: 'numeric', month: 'short' })}</strong><small class="cell-sub">${timeLabel(a.start_at)}</small></td><td><span class="status-pill status-${statusClass(a.status)}">${statusLabel(a.status)}</span></td><td>${money(a.price)}<small class="cell-sub">${a.refund_status === 'refunded' ? 'مسترد' : a.payment_status === 'paid' ? 'محصّل' : 'غير محصّل'}</small></td>${compact ? '' : `<td><div class="table-actions">${canManage ? `<button class="icon-button" title="تحديث حالة الخدمة" aria-label="تحديث حالة الخدمة" data-action="appointment-status" data-id="${a.id}" data-status="${a.status}">•••</button>` : ''}${canComplete && a.status !== 'completed' && a.status !== 'cancelled' ? `<button class="button button-small button-secondary" data-action="appointment-complete" data-id="${a.id}">تمت الخدمة</button>` : ''}${canPay && a.payment_status !== 'paid' && a.status !== 'cancelled' ? `<button class="button button-small button-primary" data-action="pay" data-id="${a.id}">تحصيل</button>` : ''}${canRefund && a.payment_status === 'paid' && a.refund_status !== 'refunded' ? `<button class="button button-small button-quiet" data-action="refund" data-id="${a.id}">استرداد</button>` : ''}</div></td>`}</tr>`).join('')}</tbody></table></div>`;
 }
 async function renderView(next) {
+    if (!allowedViews().includes(next)) { toast('ليست لديك صلاحية لفتح هذه الصفحة.', 'error'); next = 'dashboard'; }
     view = next;
-    const titles = { dashboard: ['مساحة العمل', 'نظرة عامة', 'صورة واضحة عن الحجوزات وحركة الصالون.'], appointments: ['تنظيم اليوم', 'المواعيد والتقويم', 'تابع الحجوزات، أكّد المواعيد وأدر التحصيل.'], customers: ['علاقات تدوم', 'العملاء', 'ملف موحد لكل عميل وتاريخ زيارته.'], barbers: ['فريقك هو قوتك', 'فريق الحلاقين', 'نظّم الفريق وتوزيع المواعيد.'], services: ['تفاصيل الخدمة', 'الخدمات والأسعار', 'حدّث قائمة الخدمات ومددها وأسعارها.'], finance: ['الصندوق', 'المالية والصندوق', 'سجّل الدخل والمصروفات وراجع صافي الحركة.'], reports: ['قرارات أوضح', 'التقارير والتصدير', 'اطّلع على المؤشرات ونزّل بياناتك.'], settings: ['مساحة مخصصة لك', 'إعدادات الصالون', 'هوية المكان، أوقات العمل، والأمان.'] };
+    const titles = { dashboard: ['مساحة العمل', 'نظرة عامة', 'صورة واضحة عن الحجوزات وحركة الصالون.'], appointments: ['تنظيم اليوم', 'المواعيد والتقويم', 'تابع الحجوزات، أكّد المواعيد وأدر التحصيل.'], customers: ['علاقات تدوم', 'العملاء', 'ملف موحد لكل عميل وتاريخ زيارته.'], barbers: ['فريقك هو قوتك', 'فريق الحلاقين', 'نظّم الفريق وتوزيع المواعيد.'], services: ['تفاصيل الخدمة', 'الخدمات والأسعار', 'حدّث قائمة الخدمات ومددها وأسعارها.'], finance: ['الصندوق', 'المالية والصندوق', 'سجّل الدخل والمصروفات وراجع صافي الحركة.'], reports: ['قرارات أوضح', 'التقارير والتصدير', 'اطّلع على المؤشرات ونزّل بياناتك.'], settings: ['مساحة مخصصة لك', 'إعدادات الصالون', 'هوية المكان، أوقات العمل، والأمان.'], users: ['فريق العمل', 'الموظفون والصلاحيات', 'إدارة حسابات الدخول وتوزيع الصلاحيات.'] };
     const [kicker, title, description] = titles[next];
     $('#page-title').textContent = title;
     $('#topbar-kicker').textContent = kicker;
@@ -160,6 +209,8 @@ async function renderView(next) {
             content.innerHTML = await reportsPage();
         if (next === 'settings')
             content.innerHTML = await settingsPage();
+        if (next === 'users')
+            content.innerHTML = await usersPage();
     }
     catch (error) {
         content.innerHTML = emptyState('!', 'تعذّر تحميل هذه الصفحة', escapeHtml(errorText(error)), `<button class="button button-primary" data-action="refresh-view">إعادة المحاولة</button>`);
@@ -170,9 +221,12 @@ async function dashboardPage() {
     const d = await api('/api/dashboard');
     const m = d.metrics;
     const upcoming = d.upcoming;
-    const dateGreeting = new Intl.DateTimeFormat('ar-PS', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date());
-    const cards = [['مواعيد اليوم', m.today_appointments, '◷', 'مواعيد غير ملغاة'], ['بانتظار التأكيد', m.pending_appointments, '✧', 'طلبات تحتاج مراجعتك'], ['قاعدة العملاء', m.customers, '♙', 'إجمالي العملاء المسجلين'], ['دخل هذا الشهر', money(m.monthly_income), '↗', 'عمليات تحصيل مسجلة']];
-    return `${pageHeader('مرحبًا بعودتك', `صباح الأعمال الجميلة <span class="heading-spark">✦</span>`, `اليوم ${dateGreeting}. إليك أهم ما يحتاج انتباهك.`, actionButton('new-booking', 'حجز جديد', '＋', 'class="button button-primary"'))}
+    const dateGreeting = new Intl.DateTimeFormat('ar-PS', { weekday: 'long', day: 'numeric', month: 'long', timeZone: settings.timezone || undefined }).format(new Date());
+    const cards = [['مواعيد اليوم', m.today_appointments, '◷', 'مواعيد غير ملغاة'], ['بانتظار التأكيد', m.pending_appointments, '✧', 'طلبات تحتاج مراجعتك']];
+    if (Object.prototype.hasOwnProperty.call(m, 'customers')) cards.push(['قاعدة العملاء', m.customers, '♙', 'عملاء مرتبطون بنشاطك']);
+    if (Object.prototype.hasOwnProperty.call(m, 'monthly_income')) cards.push(['دخل هذا الشهر', money(m.monthly_income), '↗', 'عمليات تحصيل مسجلة']);
+    const canCreateBooking = ['admin', 'manager', 'receptionist'].includes(user?.role);
+    return `${pageHeader('مرحبًا بعودتك', `صباح الأعمال الجميلة <span class="heading-spark">✦</span>`, `اليوم ${dateGreeting}. إليك أهم ما يحتاج انتباهك.`, canCreateBooking ? actionButton('new-booking', 'حجز جديد', '＋', 'class="button button-primary"') : '')}
     <section class="metric-grid">${cards.map((c, i) => `<article class="metric-card metric-${i}"><div class="metric-top"><span>${c[0]}</span><span class="metric-icon">${c[2]}</span></div><strong class="metric-value">${c[1]}</strong><small>${c[3]}</small></article>`).join('')}</section>
     <section class="dashboard-grid"><article class="panel panel-main"><div class="panel-heading"><div><h3>المواعيد القادمة</h3><p>أقرب المواعيد التي تتطلب المتابعة</p></div><button class="text-link" data-view="appointments">عرض جميع المواعيد ←</button></div>${appointmentsTable(upcoming, true)}</article><article class="panel welcome-panel"><div class="welcome-art"><span class="art-scissors">✂</span><span class="art-star">✦</span><span class="art-circle"></span></div><p class="eyebrow">DREEM STANDARD</p><h3>التفاصيل الصغيرة<br>تصنع تجربة كبيرة.</h3><p>نظّم الحجز، اهتمّ بالعميل، واترك لصنعتك مساحة لتتألق.</p><div class="welcome-footer"><span class="status-dot"></span> ${cachedBarbers.filter(b => !!b.active).length} حلاق نشط في الفريق</div></article></section>
     <section class="panel"><div class="panel-heading"><div><h3>أحدث الحجوزات</h3><p>آخر الطلبات التي وصلت إلى الصالون</p></div><span class="muted small-text">آخر 5 حجوزات</span></div>${appointmentsTable(d.recent, true)}</section>`;
@@ -182,7 +236,8 @@ async function appointmentsPage() {
     const selected = $('#appointment-filter')?.value || 'all';
     const q = $('#appointment-search')?.value.trim().toLowerCase() || '';
     const filtered = rows.filter(a => (selected === 'all' || a.status === selected) && (!q || [a.customer_name, a.customer_phone, a.service_name, a.barber_name].some(v => String(v || '').toLowerCase().includes(q))));
-    return `${pageHeader('كل شيء في وقته', 'المواعيد والتقويم', 'راقب جدولك اليومي وراجع الحالات والمدفوعات.', `<button class="button button-primary" data-action="new-booking">＋ إضافة موعد</button>`)}
+    const canCreate = ['admin', 'manager', 'receptionist'].includes(user?.role);
+    return `${pageHeader('كل شيء في وقته', 'المواعيد والتقويم', 'راقب جدولك اليومي وراجع الحالات والمدفوعات.', canCreate ? `<button class="button button-primary" data-action="new-booking">＋ إضافة موعد</button>` : '')}
   <section class="panel filter-panel"><div class="filter-row"><label class="search-box"><span>⌕</span><input id="appointment-search" placeholder="ابحث باسم العميل أو الهاتف أو الخدمة" value="${escapeHtml(q)}"></label><label class="select-field"><span>الحالة</span><select id="appointment-filter"><option value="all" ${selected === 'all' ? 'selected' : ''}>كل الحالات</option><option value="pending" ${selected === 'pending' ? 'selected' : ''}>بانتظار التأكيد</option><option value="confirmed" ${selected === 'confirmed' ? 'selected' : ''}>مؤكد</option><option value="completed" ${selected === 'completed' ? 'selected' : ''}>مكتمل</option><option value="cancelled" ${selected === 'cancelled' ? 'selected' : ''}>ملغي</option></select></label><span class="result-count">${filtered.length} موعد</span></div></section>
   <section class="panel">${appointmentsTable(filtered)}</section>`;
 }
@@ -196,13 +251,27 @@ async function customersPage() {
 async function barbersPage() {
     cachedBarbers = await api('/api/barbers');
     const active = cachedBarbers.filter(b => !!b.active).length;
-    return `${pageHeader('صنّاع الإطلالة', 'فريق الحلاقين', `${active} حلاق نشط · أضف الفريق ووزّع الحجوزات باحتراف.`, `<button class="button button-primary" data-action="new-barber">＋ إضافة حلاق</button>`)}
-  ${cachedBarbers.length ? `<section class="team-grid">${cachedBarbers.map(b => `<article class="team-card"><div class="team-card-top"><span class="team-avatar">${escapeHtml(b.name.trim().slice(0, 1))}</span><span class="status-pill ${b.active ? 'status-completed' : 'status-cancelled'}">${b.active ? 'نشط' : 'متوقف'}</span></div><h3>${escapeHtml(b.name)}</h3><p>${escapeHtml(b.specialty || 'حلاق · فريق الصالون')}</p><div class="team-stats"><div><strong>${b.appointments_count || 0}</strong><small>حجز</small></div><div><strong>${b.completed_count || 0}</strong><small>مكتمل</small></div></div><div class="team-actions"><button class="button button-secondary button-small" data-action="edit-barber" data-id="${b.id}">تعديل البيانات</button><button class="button button-quiet button-small" data-action="toggle-barber" data-id="${b.id}" data-active="${b.active ? 1 : 0}">${b.active ? 'إيقاف' : 'تفعيل'}</button></div></article>`).join('')}</section>` : emptyState('✂', 'ابدأ ببناء فريقك', 'لم تتم إضافة أي حلاق بعد. أضف حلاقًا لتفعيل استقبال الحجوزات.', `<button class="button button-primary" data-action="new-barber">＋ إضافة أول حلاق</button>`)}`;
+    const canManageTeam = ['admin', 'manager'].includes(user?.role);
+    return `${pageHeader('صنّاع الإطلالة', 'فريق الحلاقين', `${active} حلاق نشط · توزيع المواعيد ومتابعة الفريق.`, canManageTeam ? `<button class="button button-primary" data-action="new-barber">＋ إضافة حلاق</button>` : '')}
+  ${cachedBarbers.length ? `<section class="team-grid">${cachedBarbers.map(b => `<article class="team-card"><div class="team-card-top"><span class="team-avatar">${escapeHtml(b.name.trim().slice(0, 1))}</span><span class="status-pill ${b.active ? 'status-completed' : 'status-cancelled'}">${b.active ? 'نشط' : 'متوقف'}</span></div><h3>${escapeHtml(b.name)}</h3><p>${escapeHtml(b.specialty || 'حلاق · فريق الصالون')}</p><div class="team-stats"><div><strong>${b.appointments_count || 0}</strong><small>حجز</small></div><div><strong>${b.completed_count || 0}</strong><small>مكتمل</small></div></div>${canManageTeam ? `<div class="team-actions"><button class="button button-secondary button-small" data-action="edit-barber" data-id="${b.id}">تعديل البيانات</button><button class="button button-small button-secondary" data-action="barber-shifts" data-id="${b.id}">الدوام</button><button class="button button-small button-quiet" data-action="barber-time-off" data-id="${b.id}">الإجازات</button><button class="button button-quiet button-small" data-action="toggle-barber" data-id="${b.id}" data-active="${b.active ? 1 : 0}">${b.active ? 'إيقاف' : 'تفعيل'}</button></div>` : ''}</article>`).join('')}</section>` : emptyState('✂', 'لا يوجد فريق بعد', 'سيظهر هنا الحلاقون الذين يضيفهم مدير الصالون.', '')}`;
 }
+async function usersPage() {
+    const rows = await api('/api/users');
+    const roles = { admin: 'مدير النظام', manager: 'مدير', receptionist: 'استقبال', cashier: 'كاشير', barber: 'حلاق' };
+    const status = x => x.active ? '<span class="status-pill status-completed">نشط</span>' : '<span class="status-pill status-cancelled">موقوف</span>';
+    return `${pageHeader('إدارة الوصول', 'الموظفون والصلاحيات', 'أنشئ حساباً لكل موظف وحدّد ما يستطيع الوصول إليه.', `<button class="button button-primary" data-action="new-user">＋ إضافة موظف</button>`)}
+    <section class="panel"><div class="panel-heading"><div><h3>حسابات الدخول</h3><p>الحسابات المنفصلة تمنع مشاركة كلمة مرور المدير بين الموظفين</p></div><span class="result-count">${rows.length} حساب</span></div>
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>اسم المستخدم</th><th>الدور</th><th>الحلاق المرتبط</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>${rows.map(x => `<tr><td><strong>${escapeHtml(x.username)}</strong></td><td>${roles[x.role] || escapeHtml(x.role)}</td><td>${escapeHtml(x.barber_name || '—')}</td><td>${status(x)}</td><td><button class="button button-small button-secondary" data-action="edit-user" data-id="${x.id}">إدارة الحساب</button></td></tr>`).join('')}</tbody></table></div>` : emptyState('♙', 'لا توجد حسابات موظفين', 'أضف حساباً مستقلاً للاستقبال أو الكاشير أو الحلاق.')}</section>
+    <section class="panel note-panel"><span class="note-icon">i</span><p><strong>مهم:</strong> حسابات المدير القديمة تبقى بصلاحية مدير بعد الترقية. إيقاف حساب موظف يمنع تسجيل الدخول فوراً، وتغيير كلمة المرور يلغي جلساته السابقة.</p></section>`;
+}
+
 async function servicesPage() {
     cachedServices = await api('/api/services?include_inactive=true');
-    return `${pageHeader('قائمة خدماتك', 'الخدمات والأسعار', 'أسعار واضحة ومدد واقعية تجعل حجز العميل أسهل.', `<button class="button button-primary" data-action="new-service">＋ إضافة خدمة</button>`)}
-  ${cachedServices.length ? `<section class="service-grid">${cachedServices.map(s => `<article class="service-admin-card ${s.active ? '' : 'service-disabled'}"><div class="service-glyph">✦</div><div class="service-admin-status"><span class="status-pill ${s.active ? 'status-completed' : 'status-cancelled'}">${s.active ? 'متاحة' : 'مخفية'}</span></div><h3>${escapeHtml(s.name)}</h3><p>${escapeHtml(s.description || 'خدمة من خدمات الصالون')}</p><div class="service-info"><strong>${money(s.price)}</strong><span>◷ ${s.duration_minutes} دقيقة</span></div><div class="service-card-footer"><small>${s.bookings_count || 0} حجز</small><div><button class="button button-small button-secondary" data-action="edit-service" data-id="${s.id}">تعديل</button> <button class="button button-small button-quiet" data-action="toggle-service" data-id="${s.id}" data-active="${s.active ? 1 : 0}">${s.active ? 'إخفاء' : 'إظهار'}</button></div></div></article>`).join('')}</section>` : emptyState('◇', 'أضف خدمات صالونك', 'مثل قص الشعر، تهذيب اللحية، والباقات الخاصة.', `<button class="button button-primary" data-action="new-service">＋ إضافة خدمة</button>`)}`;
+    const canManageServices = ['admin', 'manager'].includes(user?.role);
+    const activeServices = cachedServices.filter(x => !!x.active);
+    const visibleServices = canManageServices ? cachedServices : activeServices;
+    return `${pageHeader('قائمة خدماتك', 'الخدمات والأسعار', 'أسعار واضحة ومدد واقعية تجعل حجز العميل أسهل.', canManageServices ? `<button class="button button-primary" data-action="new-service">＋ إضافة خدمة</button>` : '')}
+  ${visibleServices.length ? `<section class="service-grid">${visibleServices.map(s => `<article class="service-admin-card ${s.active ? '' : 'service-disabled'}"><div class="service-glyph">✦</div><div class="service-admin-status"><span class="status-pill ${s.active ? 'status-completed' : 'status-cancelled'}">${s.active ? 'متاحة' : 'مخفية'}</span></div><h3>${escapeHtml(s.name)}</h3><p>${escapeHtml(s.description || 'خدمة من خدمات الصالون')}</p><div class="service-info"><strong>${money(s.price)}</strong><span>◷ ${s.duration_minutes} دقيقة</span></div><div class="service-card-footer"><small>${s.bookings_count || 0} حجز</small>${canManageServices ? `<div><button class="button button-small button-secondary" data-action="edit-service" data-id="${s.id}">تعديل</button> <button class="button button-small button-quiet" data-action="toggle-service" data-id="${s.id}" data-active="${s.active ? 1 : 0}">${s.active ? 'إخفاء' : 'إظهار'}</button></div>` : ''}</div></article>`).join('')}</section>` : emptyState('◇', 'لا توجد خدمات متاحة', 'أضف الخدمات والأسعار من حساب المدير.', '')}`;
 }
 async function financePage() {
     const f = await api('/api/finance/summary');
@@ -226,8 +295,9 @@ async function reportsPage() {
 async function settingsPage() {
     settings = await api('/api/settings');
     return `${pageHeader('مصمّم حسب هويتك', 'إعدادات الصالون', 'عدّل معلومات النشاط ومظهر التطبيق وأمان الحساب.', `<button class="button button-secondary" data-action="change-password">تغيير كلمة المرور</button>`)}
-  <form id="settings-form" class="settings-layout"><section class="panel settings-panel"><div class="panel-heading"><div><h3>بيانات النشاط</h3><p>تظهر هذه البيانات داخل مساحة العمل</p></div><span class="settings-symbol">✦</span></div><div class="form-grid"><label class="field full-field"><span>اسم الصالون</span><input name="business_name" required minlength="2" maxlength="100" value="${escapeHtml(settings.business_name)}"></label><label class="field"><span>رقم الهاتف</span><input name="phone" type="tel" value="${escapeHtml(settings.phone)}" placeholder="059…"></label><label class="field"><span>العملة</span><select name="currency"><option value="ILS" ${settings.currency === 'ILS' ? 'selected' : ''}>شيكل إسرائيلي (ILS)</option><option value="USD" ${settings.currency === 'USD' ? 'selected' : ''}>دولار أمريكي (USD)</option><option value="JOD" ${settings.currency === 'JOD' ? 'selected' : ''}>دينار أردني (JOD)</option><option value="SAR" ${settings.currency === 'SAR' ? 'selected' : ''}>ريال سعودي (SAR)</option><option value="AED" ${settings.currency === 'AED' ? 'selected' : ''}>درهم إماراتي (AED)</option><option value="EUR" ${settings.currency === 'EUR' ? 'selected' : ''}>يورو (EUR)</option></select></label><label class="field full-field"><span>العنوان</span><input name="address" value="${escapeHtml(settings.address)}" placeholder="المدينة، الشارع، والمعلم القريب"></label></div></section>
+  <form id="settings-form" class="settings-layout"><section class="panel settings-panel"><div class="panel-heading"><div><h3>بيانات النشاط</h3><p>تظهر هذه البيانات داخل مساحة العمل</p></div><span class="settings-symbol">✦</span></div><div class="form-grid"><label class="field full-field"><span>اسم الصالون</span><input name="business_name" required minlength="2" maxlength="100" value="${escapeHtml(settings.business_name)}"></label><label class="field"><span>رقم الهاتف</span><input name="phone" type="tel" value="${escapeHtml(settings.phone)}" placeholder="059…"></label><label class="field"><span>العملة</span><select name="currency"><option value="ILS" ${settings.currency === 'ILS' ? 'selected' : ''}>شيكل إسرائيلي (ILS)</option><option value="USD" ${settings.currency === 'USD' ? 'selected' : ''}>دولار أمريكي (USD)</option><option value="JOD" ${settings.currency === 'JOD' ? 'selected' : ''}>دينار أردني (JOD)</option><option value="SAR" ${settings.currency === 'SAR' ? 'selected' : ''}>ريال سعودي (SAR)</option><option value="AED" ${settings.currency === 'AED' ? 'selected' : ''}>درهم إماراتي (AED)</option><option value="EUR" ${settings.currency === 'EUR' ? 'selected' : ''}>يورو (EUR)</option></select></label><label class="field full-field"><span>العنوان</span><input name="address" value="${escapeHtml(settings.address)}" placeholder="المدينة، الشارع، والمعلم القريب"></label><label class="field full-field"><span>المنطقة الزمنية المعتمدة للحجوزات</span><input value="${escapeHtml(settings.timezone || 'غير محددة')}" readonly aria-readonly="true"></label></div></section>
   <section class="panel settings-panel"><div class="panel-heading"><div><h3>أوقات العمل</h3><p>مرجع تنظيمي للفريق والعملاء</p></div><span class="settings-symbol">◷</span></div><div class="form-grid"><label class="field"><span>وقت الفتح</span><input type="time" name="open_time" value="${escapeHtml(settings.open_time || '09:00')}" required></label><label class="field"><span>وقت الإغلاق</span><input type="time" name="close_time" value="${escapeHtml(settings.close_time || '22:00')}" required></label></div><div class="theme-setting"><div><strong>مظهر مساحة العمل</strong><small>تغيير المظهر بين الداكن والفاتح</small></div><select name="theme"><option value="dark" ${settings.theme === 'dark' ? 'selected' : ''}>داكن أنيق</option><option value="light" ${settings.theme === 'light' ? 'selected' : ''}>فاتح هادئ</option></select></div><button class="button button-primary" type="submit">حفظ الإعدادات</button></section></form>
+  ${user?.role === 'admin' ? `<section class="panel security-panel"><div><span class="security-icon">⇩</span><div><h3>نسخة احتياطية</h3><p>نزّل نسخة متسقة من قاعدة بيانات الصالون، واحفظها في مكان آمن خارج الجهاز.</p></div></div><button class="button button-secondary" data-action="backup-database">تنزيل قاعدة البيانات</button></section>` : ''}
   <section class="panel security-panel"><div><span class="security-icon">⌑</span><div><h3>جلسة الإدارة</h3><p>مسجّل الدخول باسم <strong>${escapeHtml(user?.username || 'المدير')}</strong>. احتفظ بكلمة المرور ولا تشاركها.</p></div></div><button class="button button-secondary" data-action="logout">تسجيل الخروج</button></section>`;
 }
 function modal(title, body, submit = 'حفظ البيانات', formName = '') {
@@ -254,8 +324,33 @@ function newBookingModal() {
 }
 function customerModal() { modal('إضافة عميل', `<div class="form-grid">${field('name', 'اسم العميل')}${field('phone', 'رقم الهاتف', '', 'tel', true, 'minlength="5"')}${field('email', 'البريد الإلكتروني', '', 'email', false)}<label class="field full-field"><span>ملاحظات</span><textarea name="notes" rows="3" maxlength="1000"></textarea></label></div>`, 'إضافة العميل', 'customer'); }
 function barberModal(barber) { modal(barber ? 'تعديل بيانات الحلاق' : 'إضافة حلاق', `${barber ? `<input type="hidden" name="id" value="${barber.id}">` : ''}<div class="form-grid">${field('name', 'الاسم', barber?.name || '')}${field('phone', 'رقم الهاتف', barber?.phone || '', 'tel', false)}${field('specialty', 'التخصص أو النبذة', barber?.specialty || '', 'text', false)}<label class="field full-field"><span>حالة الحساب</span><select name="active"><option value="1" ${!barber || barber.active ? 'selected' : ''}>نشط ويستقبل حجوزات</option><option value="0" ${barber && !barber.active ? 'selected' : ''}>متوقف مؤقتًا</option></select></label></div>`, 'حفظ بيانات الحلاق', 'barber'); }
+function staffModal(staff) {
+    const barberOptions = cachedBarbers.filter(b => !!b.active).map(b => `<option value="${b.id}" ${staff?.barber_id === b.id ? 'selected' : ''}>${escapeHtml(b.name)}</option>`).join('');
+    modal(staff ? 'إدارة حساب الموظف' : 'إضافة حساب موظف', `${staff ? `<input type="hidden" name="id" value="${staff.id}">` : ''}<div class="form-grid">${field('username', 'اسم المستخدم', staff?.username || '', 'text', true, 'autocomplete="off" readonly style="opacity:.85"')}
+    <label class="field"><span>الصلاحية</span><select name="role"><option value="admin" ${staff?.role === 'admin' ? 'selected' : ''}>مدير النظام</option><option value="manager" ${staff?.role === 'manager' ? 'selected' : ''}>مدير</option><option value="receptionist" ${staff?.role === 'receptionist' ? 'selected' : ''}>استقبال</option><option value="cashier" ${staff?.role === 'cashier' ? 'selected' : ''}>كاشير</option><option value="barber" ${staff?.role === 'barber' ? 'selected' : ''}>حلاق</option></select></label>
+    <label class="field full-field"><span>الحلاق المرتبط (لحساب الحلاق فقط)</span><select name="barber_id"><option value="">غير مرتبط</option>${barberOptions}</select></label>
+    ${staff ? `<label class="field"><span>حالة الحساب</span><select name="active"><option value="1" ${staff.active ? 'selected' : ''}>نشط</option><option value="0" ${!staff.active ? 'selected' : ''}>موقوف</option></select></label>${field('new_password', 'كلمة مرور جديدة (اختياري)', '', 'password', false, 'minlength="8" autocomplete="new-password"')}` : `${field('password', 'كلمة المرور الأولية', '', 'password', true, 'minlength="8" autocomplete="new-password"')}`}</div>`, 'حفظ الحساب', 'staff');
+}
+async function barberShiftsModal(barberId) {
+    const shifts = await api(`/api/barbers/${barberId}/shifts`);
+    const byDay = new Map(shifts.map(x => [x.weekday, x]));
+    const inherited = shifts.length === 0;
+    const days = ['الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت', 'الأحد'];
+    const body = days.map((day,i) => { const row=byDay.get(i); return `<div class="form-grid" style="padding:10px 0;border-bottom:1px solid var(--border)"><label class="field"><span>${day}</span><select name="enabled_${i}"><option value="0" ${!row || !row.active ? 'selected' : ''}>راحة</option><option value="1" ${row?.active ? 'selected' : ''}>دوام</option></select></label>${field(`start_${i}`, 'من', row?.start_time || '09:00', 'time', false)}${field(`end_${i}`, 'إلى', row?.end_time || '17:00', 'time', false)}</div>`; }).join('');
+    modal('جدول دوام الحلاق', `<input type="hidden" name="barber_id" value="${barberId}"><label class="field full-field"><span>مصدر ساعات العمل</span><select name="inherit_hours"><option value="1" ${inherited ? 'selected' : ''}>اتباع ساعات عمل الصالون العامة</option><option value="0" ${!inherited ? 'selected' : ''}>تحديد جدول أسبوعي مستقل لهذا الحلاق</option></select></label><p class="form-hint">في الجدول المستقل، يمكنك تحديد أيام الراحة لكل أسبوع. يمكن إغلاق جميع الأيام دون الرجوع إلى ساعات الصالون العامة.</p>${body}`, 'حفظ جدول الدوام', 'shifts');
+}
+async function barberTimeOffModal(barberId) {
+    const absences = await api(`/api/barbers/${barberId}/time-off`);
+    const list = absences.length ? `<div class="table-wrap"><table><thead><tr><th>من</th><th>إلى</th><th>السبب</th><th>إجراء</th></tr></thead><tbody>${absences.map(x => `<tr><td>${escapeHtml(dateLabel(x.start_at))} · ${timeLabel(x.start_at)}</td><td>${escapeHtml(dateLabel(x.end_at))} · ${timeLabel(x.end_at)}</td><td>${escapeHtml(x.reason || '—')}</td><td><button class="button button-small button-quiet" type="button" data-action="delete-time-off" data-id="${x.id}" data-barber-id="${barberId}">حذف</button></td></tr>`).join('')}</tbody></table></div>` : `<p class="form-hint">لا توجد إجازات أو فترات عدم توفر مسجلة لهذا الحلاق.</p>`;
+    modal('إجازات وعدم توفر الحلاق', `<input type="hidden" name="barber_id" value="${barberId}"><section><h3>الفترات الحالية</h3>${list}</section><div class="divider"></div><h3>إضافة فترة جديدة</h3><div class="form-grid">${field('start_at','بداية الإجازة',localDateTime(),'datetime-local',true)}${field('end_at','نهاية الإجازة',localDateTime(new Date(Date.now()+3600000)),'datetime-local',true)}<label class="field full-field"><span>السبب أو الملاحظة</span><textarea name="reason" rows="2" maxlength="300"></textarea></label></div><p class="form-hint">لن يقبل النظام الإجازة إذا كانت تتعارض مع موعد قائم؛ انقل الموعد أو ألغِه أولاً.</p>`, 'حفظ الإجازة', 'timeoff');
+}
 function serviceModal(service) { modal(service ? 'تعديل الخدمة' : 'إضافة خدمة', `${service ? `<input type="hidden" name="id" value="${service.id}">` : ''}<div class="form-grid">${field('name', 'اسم الخدمة', service?.name || '')}${field('price', 'السعر', String(service?.price ?? ''), 'number', true, 'min="0" step="0.01"')}${field('duration_minutes', 'المدة بالدقائق', String(service?.duration_minutes ?? 30), 'number', true, 'min="5" max="480" step="5"')}<label class="field"><span>حالة الخدمة</span><select name="active"><option value="1" ${!service || service.active ? 'selected' : ''}>متاحة للحجز</option><option value="0" ${service && !service.active ? 'selected' : ''}>مخفية</option></select></label><label class="field full-field"><span>وصف الخدمة</span><textarea name="description" rows="3" maxlength="400">${escapeHtml(service?.description || '')}</textarea></label></div>`, 'حفظ الخدمة', 'service'); }
-function transactionModal() { modal('إضافة حركة مالية', `<div class="form-grid"><label class="field"><span>نوع الحركة</span><select name="kind"><option value="income">دخل</option><option value="expense">مصروف</option></select></label>${field('category', 'التصنيف', 'خدمات الصالون')}${field('amount', 'المبلغ', '', 'number', true, 'min="0.01" step="0.01"')}${field('transaction_date', 'التاريخ', localISODate(), 'date')}<label class="field full-field"><span>ملاحظة</span><textarea name="note" rows="3" maxlength="1000" placeholder="مثال: شراء مستلزمات أو إيجار"></textarea></label></div>`, 'تسجيل الحركة', 'transaction'); }
+function transactionModal() { modal('إضافة حركة مالية', `<div class="form-grid"><label class="field"><span>نوع الحركة</span><select name="kind"><option value="income">دخل</option><option value="expense">مصروف</option></select></label><label class="field"><span>وسيلة الدفع</span><select name="payment_method"><option value="cash">نقداً</option><option value="card">بطاقة (تسجيل يدوي)</option><option value="bank_transfer">تحويل بنكي</option><option value="wallet">محفظة إلكترونية</option></select></label>${field('category', 'التصنيف', 'خدمات الصالون')}${field('amount', 'المبلغ', '', 'number', true, 'min="0.01" step="0.01"')}${field('transaction_date', 'التاريخ', localISODate(), 'date')}<label class="field full-field"><span>ملاحظة</span><textarea name="note" rows="3" maxlength="1000" placeholder="مثال: شراء مستلزمات أو إيجار"></textarea></label></div>`, 'تسجيل الحركة', 'transaction'); }
+function paymentModal(appointmentId, refund = false) {
+    const methods = `<label class="field"><span>وسيلة ${refund ? 'الاسترداد' : 'التحصيل'}</span><select name="payment_method"><option value="cash">نقداً</option><option value="card">بطاقة (تسجيل يدوي)</option><option value="bank_transfer">تحويل بنكي</option><option value="wallet">محفظة إلكترونية</option></select></label>`;
+    const note = refund ? `<label class="field full-field"><span>سبب أو ملاحظة الاسترداد (اختياري)</span><textarea name="note" rows="2" maxlength="500"></textarea></label>` : '';
+    modal(refund ? 'استرداد مبلغ الموعد' : 'تحصيل مبلغ الموعد', `<input type="hidden" name="appointment_id" value="${appointmentId}"><div class="form-grid">${methods}${note}</div><p class="form-hint">تسجيل وسيلة الدفع هنا توثيق محاسبي داخلي؛ لا تتم معالجة بطاقة أو تحويل من خلال البرنامج.</p>`, refund ? 'تسجيل الاسترداد' : 'تأكيد التحصيل', refund ? 'refund' : 'payment');
+}
 function passwordModal() { modal('تغيير كلمة المرور', `<div class="form-grid">${field('current_password', 'كلمة المرور الحالية', '', 'password', true, 'autocomplete="current-password"')}${field('new_password', 'كلمة المرور الجديدة', '', 'password', true, 'minlength="8" autocomplete="new-password"')}${field('confirm_password', 'تأكيد كلمة المرور الجديدة', '', 'password', true, 'minlength="8" autocomplete="new-password"')}</div><p class="form-hint">استخدم ٨ أحرف على الأقل، وتجنب كلمات المرور المستخدمة في مواقع أخرى.</p>`, 'تحديث كلمة المرور', 'password'); }
 function closeModal() { $('#modal-root').innerHTML = ''; }
 function formValues(form) { const result = {}; new FormData(form).forEach((value, key) => result[key] = String(value).trim()); return result; }
@@ -303,10 +398,55 @@ async function handleModalSubmit(form) {
             await renderView('services');
         }
         else if (kind === 'transaction') {
-            await api('/api/finance/transactions', { method: 'POST', body: JSON.stringify({ ...d, amount: Number(d.amount) }) });
+            await api('/api/finance/transactions', { method: 'POST', body: JSON.stringify({ ...d, amount: Number(d.amount), payment_method: d.payment_method || 'cash' }) });
             toast('تم تسجيل الحركة المالية.');
             closeModal();
             await renderView('finance');
+        }
+        else if (kind === 'payment') {
+            await api(`/api/appointments/${Number(d.appointment_id)}/pay`, { method: 'POST', body: JSON.stringify({ payment_method: d.payment_method || 'cash' }) });
+            toast('تم تسجيل التحصيل دون تغيير حالة تنفيذ الخدمة.');
+            closeModal();
+            await renderView(view);
+        }
+        else if (kind === 'refund') {
+            await api(`/api/appointments/${Number(d.appointment_id)}/refund`, { method: 'POST', body: JSON.stringify({ payment_method: d.payment_method || 'cash', note: d.note || '' }) });
+            toast('تم تسجيل الاسترداد في دفتر الصندوق.');
+            closeModal();
+            await renderView(view);
+        }
+        else if (kind === 'staff') {
+            const payload = { role: d.role, barber_id: d.role === 'barber' && d.barber_id ? Number(d.barber_id) : null };
+            if (d.id) {
+                payload.active = d.active === '1';
+                if (d.new_password) payload.new_password = d.new_password;
+                await api(`/api/users/${d.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
+            } else {
+                payload.username = d.username;
+                payload.password = d.password;
+                await api('/api/users', { method: 'POST', body: JSON.stringify(payload) });
+            }
+            toast('تم حفظ حساب الموظف وصلاحياته.');
+            closeModal();
+            await renderView('users');
+        }
+        else if (kind === 'shifts') {
+            const shifts = [];
+            if (d.inherit_hours !== '1') {
+                for (let weekday=0; weekday<7; weekday++) {
+                    shifts.push({ weekday, start_time: d[`start_${weekday}`] || '09:00', end_time: d[`end_${weekday}`] || '17:00', active: d[`enabled_${weekday}`] === '1' });
+                }
+            }
+            await api(`/api/barbers/${Number(d.barber_id)}/shifts`, { method: 'PUT', body: JSON.stringify(shifts) });
+            toast('تم حفظ جدول دوام الحلاق.');
+            closeModal();
+            await renderView('barbers');
+        }
+        else if (kind === 'timeoff') {
+            await api(`/api/barbers/${Number(d.barber_id)}/time-off`, { method: 'POST', body: JSON.stringify({ start_at: d.start_at, end_at: d.end_at, reason: d.reason || '' }) });
+            toast('تم تسجيل الإجازة.');
+            closeModal();
+            await renderView('barbers');
         }
         else if (kind === 'password') {
             if (d.new_password !== d.confirm_password)
@@ -357,6 +497,22 @@ async function handleAction(button) {
             if (s)
                 serviceModal(s);
         }
+        if (action === 'new-user') staffModal(null);
+        if (action === 'edit-user') {
+            const rows = await api('/api/users');
+            const staff = rows.find(x => x.id === id);
+            if (staff) staffModal(staff);
+        }
+        if (action === 'barber-shifts') await barberShiftsModal(id);
+        if (action === 'barber-time-off') await barberTimeOffModal(id);
+        if (action === 'delete-time-off') {
+            const barberId = Number(button.dataset.barberId || 0);
+            if (barberId && confirm('حذف فترة عدم التوفر المحددة؟')) {
+                await api(`/api/barbers/${barberId}/time-off/${id}`, { method: 'DELETE' });
+                toast('تم حذف فترة عدم التوفر.');
+                await barberTimeOffModal(barberId);
+            }
+        }
         if (action === 'toggle-barber') {
             const b = cachedBarbers.find(x => x.id === id);
             if (b) {
@@ -373,12 +529,24 @@ async function handleAction(button) {
                 await renderView('services');
             }
         }
-        if (action === 'pay') {
-            if (confirm('تأكيد استلام المبلغ وتسجيله في دفتر الصندوق؟')) {
-                await api(`/api/appointments/${id}/pay`, { method: 'POST' });
-                toast('تم التحصيل وتحديث الدخل.');
-                await renderView(view);
-            }
+        if (action === 'pay') paymentModal(id, false);
+        if (action === 'refund') paymentModal(id, true);
+        if (action === 'appointment-complete') {
+            await api(`/api/appointments/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'completed' }) });
+            toast('تم تسجيل اكتمال الخدمة.');
+            await renderView('appointments');
+        }
+        if (action === 'backup-database') {
+            const response = await fetch(`${apiBase()}/api/backup`, { headers: { Authorization: `Bearer ${token}` } });
+            if (!response.ok) throw new Error('تعذر إنشاء النسخة الاحتياطية.');
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `saloon-dreem-backup-${localISODate()}.db`;
+            a.click();
+            URL.revokeObjectURL(url);
+            toast('تم تنزيل نسخة احتياطية من قاعدة البيانات.');
         }
         if (action === 'appointment-status') {
             const current = button.dataset.status || 'pending';
@@ -406,7 +574,12 @@ async function handleAction(button) {
         }
         if (action === 'theme-quick') {
             settings.theme = settings.theme === 'light' ? 'dark' : 'light';
-            await api('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { theme: settings.theme } }) });
+            if (['admin', 'manager'].includes(user?.role)) {
+                settings = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { theme: settings.theme } }) });
+                localStorage.removeItem('sd_theme');
+            } else {
+                localStorage.setItem('sd_theme', settings.theme);
+            }
             applyTheme();
             toast('تم تغيير المظهر.');
         }
@@ -415,7 +588,7 @@ async function handleAction(button) {
         toast(errorText(error), 'error');
     }
 }
-function logout() { token = ''; user = null; localStorage.removeItem('sd_access_token'); showAuth(false); toast('تم تسجيل الخروج.', 'info'); }
+function logout() { token = ''; user = null; sessionStorage.removeItem('sd_access_token'); showAuth(false); toast('تم تسجيل الخروج.', 'info'); }
 function customerProfile() { try {
     return JSON.parse(localStorage.getItem('sd_customer_profile') || '{}');
 }
@@ -449,9 +622,10 @@ async function renderCustomerView(name) {
         if (name === 'discover')
             host.innerHTML = `<section class="customer-hero"><span class="eyebrow">THE DREEM EXPERIENCE</span><h1>وقتك لك.<br><em>واطلالتك علينا.</em></h1><p>اختر خدمتك واحجز الموعد الذي يناسبك. تجربة بسيطة، عناية بالتفاصيل، ووقت محفوظ لك.</p><button class="button button-primary" data-customer-view="book">احجز موعدك الآن <span>←</span></button><span class="customer-hero-note">${services.length} خدمات متاحة · ${barbers.length} من الحلاقين في الفريق</span><div class="hero-decoration"><span>✦</span><b>D</b><i>✂</i></div></section><div class="section-title-row"><div><p class="eyebrow">MADE FOR YOUR STYLE</p><h2>خدماتنا</h2></div><button class="text-link" data-customer-view="book">احجز خدمة ←</button></div>${services.length ? `<div class="customer-service-grid">${services.map((s, i) => `<article class="customer-service-card"><div class="service-card-top"><span class="service-glyph">${['✦', '✂', '◇', '✧', '✥'][i % 5]}</span><span class="service-number">0${i + 1}</span></div><h3>${escapeHtml(s.name)}</h3><p>${escapeHtml(s.description || 'خدمة مصممة لتناسب تفاصيل إطلالتك.')}</p><div class="customer-service-meta"><strong>${money(s.price)}</strong><span>◷ ${s.duration_minutes} دقيقة</span></div><button class="button button-secondary button-wide" data-action="customer-book-service" data-id="${s.id}">احجز هذه الخدمة</button></article>`).join('')}</div>` : emptyState('◇', 'الخدمات ستُضاف قريبًا', 'تواصل مع الصالون لمعرفة الخدمات المتاحة.')}`;
         if (name === 'book')
-            host.innerHTML = `<section class="customer-content-heading"><p class="eyebrow">YOUR NEXT APPOINTMENT</p><h1>احجز موعدك.</h1><p>املأ التفاصيل التالية وسيراجع فريق الصالون طلبك لتأكيد الموعد.</p></section><div class="booking-layout"><aside class="booking-aside"><div class="booking-aside-mark">D<span>✦</span></div><h3>وقت لنفسك،<br>بأسلوبك.</h3><p>اختر الخدمة والموعد المناسب، وسنتولى الباقي.</p><div class="booking-aside-detail"><span>◷</span><div><strong>أوقات العمل</strong><small>${escapeHtml(settings.open_time || '09:00')} – ${escapeHtml(settings.close_time || '22:00')} (توقيت الصالون)</small></div></div><div class="booking-aside-detail"><span>✓</span><div><strong>تأكيد بشري</strong><small>يصل طلبك للفريق للمراجعة والتأكيد</small></div></div></aside><form id="customer-booking-form" class="panel customer-booking-form"><div class="form-grid"><label class="field full-field"><span>الخدمة المطلوبة</span><select name="service_id" id="customer-service-select" required><option value="">اختر الخدمة</option>${services.map(s => `<option value="${s.id}" ${String(s.id) === customerPrefillService ? 'selected' : ''}>${escapeHtml(s.name)} · ${money(s.price)} · ${s.duration_minutes} د</option>`).join('')}</select></label><label class="field full-field"><span>الحلاق المفضل</span><select name="barber_id"><option value="">أي حلاق متاح</option>${barbers.map(b => `<option value="${b.id}">${escapeHtml(b.name)}${b.specialty ? ` — ${escapeHtml(b.specialty)}` : ''}</option>`).join('')}</select></label>${field('customer_name', 'اسمك الكامل', profile.name || '', 'text', true, 'minlength="2" autocomplete="name"')}${field('customer_phone', 'رقم الهاتف للتواصل', profile.phone || '', 'tel', true, 'minlength="5" autocomplete="tel"')}${field('start_at', 'التاريخ والوقت', localDateTime(new Date(Date.now() + 86400000)).slice(0, 16), 'datetime-local', true, `min="${localDateTime()}"`)}<label class="field full-field"><span>ملاحظات للفريق (اختياري)</span><textarea name="notes" rows="3" maxlength="500" placeholder="مثال: تفضيل في القصة أو ملاحظة للحلاق"></textarea></label></div><p class="form-hint">إرسال الطلب لا يعني تأكيد الموعد؛ سيُراجع الفريق الحجز أولًا.</p><button class="button button-primary button-wide" type="submit">إرسال طلب الحجز <span>←</span></button></form></div>`;
+            host.innerHTML = `<section class="customer-content-heading"><p class="eyebrow">YOUR NEXT APPOINTMENT</p><h1>احجز موعدك.</h1><p>املأ التفاصيل التالية وسيراجع فريق الصالون طلبك لتأكيد الموعد.</p></section><div class="booking-layout"><aside class="booking-aside"><div class="booking-aside-mark">D<span>✦</span></div><h3>وقت لنفسك،<br>بأسلوبك.</h3><p>اختر الخدمة والموعد المناسب، وسنتولى الباقي.</p><div class="booking-aside-detail"><span>◷</span><div><strong>أوقات العمل</strong><small>${escapeHtml(settings.open_time || '09:00')} – ${escapeHtml(settings.close_time || '22:00')} (توقيت الصالون)</small></div></div><div class="booking-aside-detail"><span>✓</span><div><strong>تأكيد بشري</strong><small>يصل طلبك للفريق للمراجعة والتأكيد</small></div></div></aside><form id="customer-booking-form" class="panel customer-booking-form"><div class="form-grid"><label class="field full-field"><span>الخدمة المطلوبة</span><select name="service_id" id="customer-service-select" required><option value="">اختر الخدمة</option>${services.map(s => `<option value="${s.id}" ${String(s.id) === customerPrefillService ? 'selected' : ''}>${escapeHtml(s.name)} · ${money(s.price)} · ${s.duration_minutes} د</option>`).join('')}</select></label><label class="field full-field"><span>الحلاق المفضل</span><select name="barber_id" id="customer-barber-select"><option value="">أي حلاق متاح</option>${barbers.map(b => `<option value="${b.id}">${escapeHtml(b.name)}${b.specialty ? ` — ${escapeHtml(b.specialty)}` : ''}</option>`).join('')}</select></label>${field('customer_name', 'اسمك الكامل', profile.name || '', 'text', true, 'minlength="2" autocomplete="name"')}${field('customer_phone', 'رقم الهاتف للتواصل', profile.phone || '', 'tel', true, 'minlength="5" autocomplete="tel"')}<label class="field"><span>تاريخ الموعد</span><input name="booking_date" id="customer-booking-date" type="date" value="${salonISODateOffset(1)}" min="${localISODate()}" required></label><label class="field"><span>الوقت المتاح والحلاق</span><select name="time_slot" id="customer-time-slot" required><option value="">اختر الخدمة والتاريخ أولاً</option></select></label><label class="field full-field"><span>ملاحظات للفريق (اختياري)</span><textarea name="notes" rows="3" maxlength="500" placeholder="مثال: تفضيل في القصة أو ملاحظة للحلاق"></textarea></label></div><p class="form-hint">تظهر هنا الأوقات المتاحة فعلياً حسب مدة الخدمة ودوام الحلاق والإجازات والحجوزات القائمة. إرسال الطلب يبقى بانتظار تأكيد الصالون.</p><button class="button button-primary button-wide" type="submit">إرسال طلب الحجز <span>←</span></button></form></div>`;
+        void loadCustomerAvailability(host.querySelector('#customer-booking-form'));
         if (name === 'mybookings')
-            host.innerHTML = `<div class="customer-content-heading"><p class="eyebrow">YOUR APPOINTMENTS</p><h1>مواعيدك.</h1><p>الطلبات التي أرسلتها من هذا الجهاز تظهر هنا.</p></div>${bookings.length ? `<div class="local-booking-list">${bookings.slice().reverse().map(b => `<article class="local-booking-card"><div class="local-booking-date"><strong>${dateLabel(b.start_at, { day: 'numeric' })}</strong><span>${dateLabel(b.start_at, { month: 'short' })}</span></div><div class="local-booking-info"><h3>${escapeHtml(b.service)}</h3><p>${escapeHtml(b.barber)} · ${timeLabel(b.start_at)}</p><small>طلب رقم ${b.id} · ${escapeHtml(b.phone)}</small></div><span class="status-pill status-${statusClass(b.status)}">${statusLabel(b.status)}</span><strong>${money(b.price)}</strong></article>`).join('')}</div><p class="form-hint">سجل المواعيد محفوظ محليًا على هذا الجهاز فقط، وقد لا يعكس تغييرات أجراها الصالون بعد إرسال الطلب.</p>` : emptyState('◷', 'لا توجد مواعيد محفوظة على هذا الجهاز', 'عند إرسال طلب جديد من هنا سيظهر ضمن مواعيدك.', `<button class="button button-primary" data-customer-view="book">احجز موعدًا</button>`)}`;
+            host.innerHTML = `<div class="customer-content-heading"><p class="eyebrow">YOUR APPOINTMENTS</p><h1>مواعيدك.</h1><p>تظهر الحجوزات المحفوظة على هذا الجهاز، ويمكنك استرجاع أي حجز من جهاز آخر برقم الحجز والهاتف.</p></div><section class="panel"><h3>استرجاع حجز من جهاز آخر</h3><form id="customer-lookup-form" class="form-grid"><label class="field"><span>رقم الحجز</span><input name="appointment_id" type="number" min="1" step="1" required placeholder="مثال: 125"></label>${field('phone', 'رقم الهاتف المسجل في الحجز', profile.phone || '', 'tel', true, 'minlength="5" autocomplete="tel"')}<button class="button button-primary full-field" type="submit">استرجاع الحجز</button></form><p class="form-hint">لخصوصيتك، يجب إدخال رقم الحجز ورقم الهاتف المطابق. لا يعرض هذا البحث سوى الحجز المحدد.</p></section>${bookings.length ? `<div class="local-booking-list">${bookings.slice().reverse().map(b => `<article class="local-booking-card"><div class="local-booking-date"><strong>${dateLabel(b.start_at, { day: 'numeric' })}</strong><span>${dateLabel(b.start_at, { month: 'short' })}</span></div><div class="local-booking-info"><h3>${escapeHtml(b.service)}</h3><p>${escapeHtml(b.barber)} · ${timeLabel(b.start_at)}</p><small>طلب رقم ${b.id}</small></div><span class="status-pill status-${statusClass(b.status)}">${statusLabel(b.status)}</span><strong>${money(b.price)}</strong><small>${b.refund_status === 'refunded' ? 'المبلغ مسترد' : b.payment_status === 'paid' ? 'محصّل' : 'غير محصّل'}</small></article>`).join('')}</div>` : emptyState('◷', 'لا توجد مواعيد محفوظة على هذا الجهاز', 'يمكنك استرجاع حجزك من النموذج أعلاه أو إنشاء حجز جديد.', `<button class="button button-primary" data-customer-view="book">احجز موعدًا</button>`)}`;
         if (name === 'loyalty') {
             const visits = bookings.filter(b => b.status === 'completed').length;
             const target = 5;
@@ -464,6 +638,66 @@ async function renderCustomerView(name) {
         host.innerHTML = emptyState('!', 'تعذر تحميل تجربة العميل', escapeHtml(errorText(error)), `<button class="button button-secondary" data-action="customer-retry">إعادة المحاولة</button>`);
     }
 }
+async function submitCustomerLookup(form) {
+    const d = formValues(form);
+    const button = $('button[type=submit]', form);
+    if (button) { button.disabled = true; button.textContent = 'جارٍ البحث…'; }
+    try {
+        const id = Number(d.appointment_id);
+        if (!Number.isSafeInteger(id) || id <= 0) throw new Error('أدخل رقم حجز صحيحاً.');
+        const data = await api('/api/public/appointments/lookup', { method: 'POST', body: JSON.stringify({ appointment_id: id, phone: d.phone }) });
+        const a = data.appointment;
+        const list = localBookings().filter(item => Number(item.id) !== id);
+        list.push({ id: a.id, phone: d.phone, service: a.service_name, barber: a.barber_name, start_at: a.start_at, price: a.price, status: a.status, payment_status: a.payment_status, refund_status: a.refund_status, created_at: new Date().toISOString() });
+        localStorage.setItem('sd_customer_bookings', JSON.stringify(list.slice(-100)));
+        localStorage.setItem('sd_customer_profile', JSON.stringify({ ...customerProfile(), phone: d.phone }));
+        toast('تم استرجاع الحجز وتحديث حالته.');
+        await renderCustomerView('mybookings');
+    } catch (error) {
+        toast(errorText(error), 'error');
+        if (button) { button.disabled = false; button.textContent = 'استرجاع الحجز'; }
+    }
+}
+
+async function loadCustomerAvailability(form) {
+    if (!form) return;
+    const requestId = ++availabilityRequestId;
+    const select = $('#customer-time-slot', form);
+    const serviceId = $('#customer-service-select', form)?.value;
+    const selectedDate = $('#customer-booking-date', form)?.value;
+    const barberId = $('#customer-barber-select', form)?.value || '';
+    if (!select) return;
+    if (!serviceId || !selectedDate) {
+        select.innerHTML = '<option value="">اختر الخدمة والتاريخ أولاً</option>';
+        return;
+    }
+    const previous = select.value;
+    select.disabled = true;
+    select.innerHTML = '<option value="">جارٍ تحميل الأوقات المتاحة…</option>';
+    try {
+        const query = new URLSearchParams({ date: selectedDate, service_id: serviceId });
+        if (barberId) query.set('barber_id', barberId);
+        const result = await api(`/api/public/availability?${query.toString()}`);
+        if (requestId !== availabilityRequestId || !form.isConnected) return;
+        if (!result.slots.length) {
+            select.innerHTML = '<option value="">لا توجد أوقات متاحة في هذا اليوم</option>';
+            return;
+        }
+        select.innerHTML = '<option value="">اختر الوقت المناسب</option>' + result.slots.map(slot => {
+            const value = `${slot.start_at}|${slot.barber_id}`;
+            const label = `${timeLabel(slot.start_at)} · ${slot.barber_name}`;
+            return `<option value="${escapeHtml(value)}" ${value === previous ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+        }).join('');
+    } catch (error) {
+        if (requestId === availabilityRequestId && form.isConnected) {
+            select.innerHTML = '<option value="">تعذر تحميل المواعيد المتاحة</option>';
+            toast(errorText(error), 'error');
+        }
+    } finally {
+        if (requestId === availabilityRequestId && form.isConnected) select.disabled = false;
+    }
+}
+
 async function submitCustomerBooking(form) {
     const d = formValues(form);
     const button = $('button[type=submit]', form);
@@ -474,9 +708,12 @@ async function submitCustomerBooking(form) {
     try {
         if (!d.service_id)
             throw new Error('اختر الخدمة المطلوبة.');
+        const [startAt, assignedBarber] = String(d.time_slot || '').split('|');
+        if (!startAt || !assignedBarber)
+            throw new Error('اختر أحد الأوقات المتاحة قبل إرسال الحجز.');
         const profile = { name: d.customer_name, phone: d.customer_phone };
         localStorage.setItem('sd_customer_profile', JSON.stringify(profile));
-        const data = await api('/api/public/appointments', { method: 'POST', body: JSON.stringify({ customer_name: d.customer_name, customer_phone: d.customer_phone, service_id: Number(d.service_id), barber_id: d.barber_id ? Number(d.barber_id) : null, start_at: d.start_at, notes: d.notes || '' }) });
+        const data = await api('/api/public/appointments', { method: 'POST', body: JSON.stringify({ customer_name: d.customer_name, customer_phone: d.customer_phone, service_id: Number(d.service_id), barber_id: Number(assignedBarber), start_at: startAt, notes: d.notes || '' }) });
         const a = data.appointment;
         const list = localBookings();
         list.push({ id: a.id, name: a.customer_name, phone: a.customer_phone, service: a.service_name, barber: a.barber_name || 'فريق الصالون', start_at: a.start_at, price: a.price, status: a.status, created_at: new Date().toISOString() });
@@ -526,6 +763,12 @@ document.addEventListener('click', event => {
         void handleAction(actionButtonEl);
     }
 });
+document.addEventListener('change', event => {
+    const form = event.target.closest('#customer-booking-form');
+    if (form && ['customer-service-select', 'customer-booking-date', 'customer-barber-select'].includes(event.target.id)) {
+        void loadCustomerAvailability(form);
+    }
+});
 document.addEventListener('submit', event => {
     const form = event.target;
     if (form.id === 'auth-form') {
@@ -543,6 +786,10 @@ document.addEventListener('submit', event => {
     if (form.id === 'customer-booking-form') {
         event.preventDefault();
         void submitCustomerBooking(form);
+    }
+    if (form.id === 'customer-lookup-form') {
+        event.preventDefault();
+        void submitCustomerLookup(form);
     }
     if (form.id === 'customer-profile-form') {
         event.preventDefault();
@@ -583,6 +830,7 @@ async function handleSettingsSubmit(form) {
     const d = formValues(form);
     try {
         settings = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { business_name: d.business_name, phone: d.phone, address: d.address, currency: d.currency, open_time: d.open_time, close_time: d.close_time, theme: d.theme } }) });
+        localStorage.removeItem('sd_theme');
         applyTheme();
         $('#sidebar-salon-name').textContent = settings.business_name;
         toast('تم حفظ إعدادات الصالون.');
