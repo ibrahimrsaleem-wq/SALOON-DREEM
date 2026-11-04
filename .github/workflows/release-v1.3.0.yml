@@ -4,7 +4,7 @@ on:
   push:
     branches: [release/v1.3.0-production]
     paths:
-      - 'source-bundles/part-05b.b64'
+      - 'source-bundles/segment-010.b64'
   workflow_dispatch:
 
 permissions:
@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           BUNDLE='source-bundles/SALOON-DREEM-v1.3.0.patch.gz.b64'
           mkdir -p source-bundles
-          cat source-bundles/part-*.b64 > "$BUNDLE"
+          cat source-bundles/segment-*.b64 > "$BUNDLE"
           gzip_file="$RUNNER_TEMP/saloon-dreem-1.3.0.patch.gz"
           base64 --decode "$BUNDLE" > "$gzip_file"
           expected="$(tr -d '\r\n ' < source-bundles/SALOON-DREEM-v1.3.0.patch.sha256)"
