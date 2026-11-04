@@ -91,7 +91,7 @@ jobs:
             --exclude='.pytest_cache' --exclude='__pycache__' \
             --exclude='data/*.db' --exclude='data/*.sqlite' \
             --exclude='data/*.sqlite3' --exclude='data/.token-secret' \
-            --exclude='source-bundles' .
+            --exclude='source-bundles' --exclude='release-source' .
           test -s release-source/SALOON-DREEM-source.tar.gz
       - uses: actions/upload-artifact@v4
         with:
@@ -237,39 +237,19 @@ jobs:
           retention-days: 30
 
   persist-source:
-    name: Commit the tested project to the release branch
+    name: Record the validated source release commit
     if: github.event_name == 'push'
     needs: [validate, windows-portable, android-apk]
     runs-on: ubuntu-latest
     outputs:
-      commit_sha: ${{ steps.persist.outputs.commit_sha }}
+      commit_sha: ${{ steps.record.outputs.commit_sha }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          name: SALOON-DREEM-Source-1.3.0
-          path: source-package
-      - name: Persist the validated source tree
-        id: persist
+      - name: Record branch commit for the release
+        id: record
         shell: bash
         run: |
           set -euo pipefail
-          tar -xzf source-package/SALOON-DREEM-source.tar.gz -C "$GITHUB_WORKSPACE"
-          # Do not commit workflow files: the repository token does not carry the workflows permission.
-          # Preserve the already reviewed build/signing workflows from the branch.
-          git checkout -- .github/workflows
-          rm -rf source-bundles source-package
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m 'release: integrate tested SALOON DREEM 1.3.0 source'
-            git push origin "HEAD:$GITHUB_REF_NAME"
-          fi
-          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
   publish-release:
     name: Publish verified GitHub Release
