@@ -43,7 +43,26 @@ jobs:
           actual="$(sha256sum "$gzip_file" | cut -d' ' -f1)"
           test "$actual" = "$expected"
           gzip -dc "$gzip_file" > "$RUNNER_TEMP/saloon-dreem-1.3.0.patch"
+          set +e
           patch --batch --forward -p1 < "$RUNNER_TEMP/saloon-dreem-1.3.0.patch"
+          patch_status=$?
+          set -e
+          mapfile -t rejects < <(find . -type f -name '*.rej' -not -path './.git/*' -print)
+          if (("${#rejects[@]}" > 0)); then
+            if (("${#rejects[@]}" != 1)) || [[ "${rejects[0]}" != "./README.md.rej" ]]; then
+              printf 'Unexpected patch rejects:\n%s\n' "${rejects[@]}"
+              exit 1
+            fi
+            # Keep the newer README already present on the release branch.
+            rm -f README.md.rej README.md.orig
+            echo "Preserved the existing README; all application source patches must still pass checks."
+          fi
+          grep -Fq '"version": "1.3.0"' package.json
+          grep -Fq 'APP_VERSION = "1.3.0"' backend/app/main.py
+          grep -Fq 'def refund_appointment(' backend/app/main.py
+          grep -Fq 'def public_availability(' backend/app/main.py
+          grep -Fq 'def test_concurrent_requests_cannot_reserve_the_same_barber_slot' tests/test_api.py
+          echo "Patch application completed; status=$patch_status; core 1.3.0 source checks passed."
       - name: Install Python dependencies and run tests
         run: |
           python -m pip install --upgrade pip
