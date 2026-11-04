@@ -10,7 +10,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: saloon-dreem-v1.3.0-publish-fast
+  group: saloon-dreem-v1.3.0-publish-final
   cancel-in-progress: false
 
 jobs:
