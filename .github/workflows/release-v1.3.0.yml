@@ -335,10 +335,10 @@ jobs:
             dist/SALOON-DREEM-Android-1.3.0-debug.apk dist/SALOON-DREEM-Source-1.3.0.tar.gz
             dist/SALOON-DREEM-Icon-1.3.0.ico dist/SALOON-DREEM-1.3.0-SHA256SUMS.txt)
           if gh release view v1.3.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload v1.3.0 --repo "$GITHUB_REPOSITORY" "\${ASSETS[@]}" --clobber
+            gh release upload v1.3.0 --repo "$GITHUB_REPOSITORY" "${ASSETS[@]}" --clobber
             gh release edit v1.3.0 --repo "$GITHUB_REPOSITORY" --title 'SALOON DREEM 1.3.0' --notes-file dist/RELEASE-NOTES-AR.md
           else
             gh release create v1.3.0 --repo "$GITHUB_REPOSITORY" --target '${{ needs.persist-source.outputs.commit_sha }}' \
-              --title 'SALOON DREEM 1.3.0' --notes-file dist/RELEASE-NOTES-AR.md "\${ASSETS[@]}"
+              --title 'SALOON DREEM 1.3.0' --notes-file dist/RELEASE-NOTES-AR.md "${ASSETS[@]}"
           fi
           gh release view v1.3.0 --repo "$GITHUB_REPOSITORY"
